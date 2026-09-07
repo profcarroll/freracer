@@ -33,6 +33,17 @@ MAX_SPEED = 6000.0        # world units / sec
 ACCEL = 2400.0            # units/sec^2 toward MAX_SPEED
 BRAKE_DECEL = 5200.0
 OFFROAD_MAX_SPEED = MAX_SPEED * 0.45
+# Grass is a speed cap you brake down *to*, not an unbounded brake. It used to
+# subtract BRAKE_DECEL every frame while ACCEL only added 2400, giving the
+# grass a terminal speed of exactly zero - so a single clipped corner stopped
+# the car dead, and recovering meant holding a tilt for ~7 s to crawl sideways
+# back onto the tarmac at the STEER_MIN_SPEED_FRAC floor before the throttle
+# did anything at all. On an arcade racer with no manual throttle that ends
+# the run. OFFROAD_MAX_SPEED already showed the intent was "slower, still
+# moving"; grass just never had its own floor. The value below is a starting
+# point picked to leave enough lateral authority to steer out in about a
+# second - it has not been tuned by driving.
+GRASS_MAX_SPEED = MAX_SPEED * 0.22
 CENTRIFUGAL = 0.0007      # curve pulls the car outward, proportional to speed
 CAR_HALF_WIDTH = 120.0
 OBSTACLE_HALF_WIDTH = 110.0
@@ -909,19 +920,31 @@ def main():
                 in_grass = abs_x > width * GRASS_ZONE
                 in_rumble = (not in_grass) and abs_x > width * RUMBLE_ZONE
 
-                target_max = OFFROAD_MAX_SPEED if off_road else MAX_SPEED
+                # One target speed per surface, approached from either side:
+                # below it the throttle pulls up to it, above it the surface
+                # brakes down to it, and it is never crossed. That last part
+                # is what stops grass being a dead end.
+                if in_grass:
+                    target_max = GRASS_MAX_SPEED
+                    decel = BRAKE_DECEL
+                elif off_road:
+                    target_max = OFFROAD_MAX_SPEED
+                    decel = BRAKE_DECEL * 0.5
+                else:
+                    target_max = MAX_SPEED
+                    decel = BRAKE_DECEL * 0.5
+
                 if speed < target_max:
                     speed += ACCEL * dt
                     if speed > target_max:
                         speed = target_max
                 else:
-                    speed -= BRAKE_DECEL * 0.5 * dt
+                    speed -= decel * dt
                     if speed < target_max:
                         speed = target_max
 
                 buzz_key = None
                 if in_grass:
-                    speed -= BRAKE_DECEL * dt
                     if not pending_event:
                         pending_event = 'grass'
                     if frame_now >= next_zone_buzz:
