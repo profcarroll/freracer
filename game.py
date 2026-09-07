@@ -690,6 +690,73 @@ def draw_car(screen, offset_frac):
     pygame.draw.rect(screen, (20, 20, 20), (cx + 30, cy + 10, 20, 12))
 
 
+RESULT_HOLD = 12.0            # seconds the result panel stays up if untouched
+
+
+def draw_result(screen, outcome, elapsed, hits, par):
+    """Post-race panel. Returns 1 if it drew something.
+
+    Reaching the finish line used to return straight out of main(): the
+    process ended, the Hildon launcher's shell exited with it, and the player
+    was dropped back at the app grid with no explanation. That is
+    indistinguishable from a crash, and it was reported as one - twice, in a
+    playtest where both runs had in fact been completed cleanly, under par,
+    with no collisions. The lap is 48000 units and MAX_SPEED is 6000/s, so a
+    good run is over in ten seconds; whatever else changes about the course,
+    the end of a race has to say that it ended.
+    """
+    if outcome == 'finish':
+        title = 'FINISHED'
+        accent = (250, 220, 90) if elapsed <= par else (235, 235, 235)
+    elif outcome == 'timeout':
+        title = 'TIME UP'
+        accent = (235, 235, 235)
+    else:
+        return 0                      # 'quit' - the player asked to leave
+
+    big = pygame.font.Font(None, 76)
+    small = pygame.font.Font(None, 34)
+    pw = 520
+    ph = 258
+    px = (W - pw) // 2
+    py = (H - ph) // 2
+    pygame.draw.rect(screen, (10, 10, 14), (px, py, pw, ph))
+    pygame.draw.rect(screen, accent, (px, py, pw, ph), 3)
+
+    verdict = 'under par' if elapsed <= par else 'over par'
+    lines = ((big, title, accent),
+             (small, '%.1f s' % elapsed, (238, 238, 238)),
+             (small, 'par %.0f s - %s' % (par, verdict), (168, 168, 176)),
+             (small, 'hits %d' % hits, (168, 168, 176)),
+             (small, 'tap the screen to exit', (112, 112, 122)))
+    y = py + 24
+    i = 0
+    while i < len(lines):
+        font, text, colour = lines[i]
+        surf = font.render(text, 1, colour)
+        screen.blit(surf, (px + (pw - surf.get_width()) // 2, y))
+        y += surf.get_height() + 8
+        i += 1
+    return 1
+
+
+def hold_result(screen):
+    # The race loop treats any tap as "end the race", so the queue may hold
+    # the very tap that crossed the line. Drop it, or the panel flashes past.
+    pygame.event.clear()
+    pygame.display.flip()
+    hold_until = time.time() + RESULT_HOLD
+    while time.time() < hold_until:
+        events = pygame.event.get()
+        i = 0
+        while i < len(events):
+            e = events[i]
+            if e.type == pygame.QUIT or e.type == pygame.KEYDOWN or e.type == pygame.MOUSEBUTTONDOWN:
+                return
+            i += 1
+        pygame.time.wait(50)
+
+
 def default_track_path():
     # Picked when launched with no arguments at all, e.g. from the Maemo
     # desktop icon: lowest-numbered .trk next to game.py is the "main" course.
@@ -983,6 +1050,10 @@ def main():
 
         tx.close({'outcome': outcome, 'elapsed': elapsed, 'hits': hits, 'par': trk['par'],
                   'frames': frames, 'avg_fps': avg_fps})
+
+        if draw_result(screen, outcome, elapsed, hits, trk['par']):
+            hold_result(screen)
+
         pygame.quit()
         sys.stdout.write('RESULT outcome=%s elapsed=%.1f hits=%d par=%g frames=%d avg_fps=%.1f\n' % (
             outcome, elapsed, hits, trk['par'], frames, avg_fps))

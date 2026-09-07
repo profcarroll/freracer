@@ -69,6 +69,11 @@ python2.5 game.py tracks/001-autumn-hills.trk         # real accelerometer, no t
 python2.5 game.py                                    # same, but picks the lowest-numbered track in tracks/
 ```
 
+A race ends with a result panel — time, par, hits — which stays up for 12 seconds or
+until you tap. Before that existed, finishing returned straight out of `main()`, the
+launcher's shell exited with it, and the player landed back at the app grid with no
+explanation; the first playtest of the fixed renderer reported that as a crash.
+
 `game.py [track] [tilt_source] [telemetry_csv] [timeout_s]` — all arguments are optional.
 With no track given it plays the lowest-numbered `.trk` in `tracks/` (this is what the
 desktop launcher does). Hold the device the way you want to play for the first

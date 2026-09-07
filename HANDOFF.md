@@ -132,6 +132,53 @@ shading and alpha in pure Python 2.5 over SDL 1.2, with no GPU path pygame 1.9.1
 use, is not a tuning problem. 16-bit Super Scaler is the right target and is what the
 renderer now is.
 
+### Measured on the device, at the end of session 3
+
+The renderer is bound by **pygame draw calls per frame, not by pixels** — roughly 90 µs
+a call, with the pixels behind them nearly free. This got assumed the wrong way round
+once: splitting the ground fill and rumble strip into left/right halves flanking the
+road saved ~440k pixels a frame, cost 98 draw calls, and measured 22.0 → 18.5 fps.
+Reverted. Fewer, bigger primitives win here.
+
+So `MIN_BAND_HEIGHT`, not `DRAW_DISTANCE`, is the frame-rate dial — it drops draw calls
+without shortening the road. At `DRAW_DISTANCE=120`: 1 → 22.0 fps, 2 → 24.5, 3 → 26.5,
+4 → 27.6. Shipping at 3, which measures **26.9 avg / 25.5 worst** on the render probe and
+**~22–24 fps for the full game loop**. `DRAW_DISTANCE` stays at 120 for lookahead (two
+seconds of road at `MAX_SPEED`); cutting it to 100 is worth only 1.3 fps.
+
+Don't raise `MIN_BAND_HEIGHT` past 3 without driving it — it quantises which segments get
+drawn, so the choice changes as the camera moves, and a coarse threshold can make the
+stripes pop. No still frame will show that.
+
+### The "crash" was the finish line
+
+First human drive of the fixed build reported the game crashing once it got up to speed.
+It wasn't crashing. `freracer.log` has never contained a traceback, and both runs ended
+`outcome=finish`, under par, with no collisions — 12.1 s and 10.3 s against a par of 22.
+The lap is 48000 units and `MAX_SPEED` is 6000/s, so a clean run is **eight seconds
+long**. `main()` then returned, the launcher's shell exited with it, and the player was
+dropped at the app grid with no explanation. `draw_result`/`hold_result` now show a
+result panel (time, par, hits) for 12 s or until tapped.
+
+**The course is far too short for the car.** Par of 22 s was written for a much slower
+average speed than the game actually delivers. This is the next real design question:
+either the tracks get much longer, or `MAX_SPEED` comes down, or both. See "next steps".
+
+### Open: the grass is a full stop, not a penalty
+
+`in_grass` applies `BRAKE_DECEL` (5200) unconditionally while `ACCEL` is 2400, so terminal
+speed off-road is exactly zero — despite `OFFROAD_MAX_SPEED` (2700) plainly intending
+"slower, still moving". Recovering means holding a tilt for ~7 s to crawl sideways back
+onto the tarmac at the `STEER_MIN_SPEED_FRAC` floor before the throttle does anything. On
+an arcade racer with no manual throttle, one clipped corner ends the run in practice.
+Bot-confirmed twice (`telemetry/bot-s3.csv`, `bot-s4.csv`): speed 887 → 0 in under a
+second of grass, then zero for the remaining 13 s.
+
+The *value* of an off-road speed is a feel question and deliberately wasn't guessed at.
+The *structure* isn't: a brake that exceeds acceleration has terminal velocity zero,
+which no answer to "how slow should grass be" would ask for. Decelerate toward a named
+grass cap instead of through it, then tune the cap by driving.
+
 ### What session 4 must measure first
 
 `DRAW_DISTANCE`'s basis is gone. `160 → 36 fps` and `120 → ~50 fps` were measured
@@ -155,6 +202,9 @@ patching. Suggested starting point:
    still session-1 guesswork that's never been felt by a human hand. If it's still not
    fun or not controllable, that telemetry (now that `raw_x` is the real steering signal)
    will actually mean something, unlike session 1's bot-only runs.
+1.5. **Lap length / `MAX_SPEED` is now the biggest open question** — see "The 'crash'
+   was the finish line" above. A course that ends in ten seconds cannot be judged for
+   feel, because it is over before the player has settled into it.
 2. **Consider instrumenting *before* re-tuning by feel.** e.g. log the actual `raw_x`
    range during a real drive (not a synthetic roll test) so `STEER_GAIN`/`TILT_DEAD_ZONE`
    are picked from real driving-grip data, not the one 22-second sample from this
