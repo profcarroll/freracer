@@ -50,6 +50,8 @@ pygame.init()
 pygame.mouse.set_visible(False)
 screen = pygame.display.set_mode((game.W, game.H), pygame.FULLSCREEN, 16)
 bg = game.build_theme_background(trk['theme'])
+backdrop = game.build_backdrop(trk['theme'])
+palette = game.build_palette(trk['theme'])
 
 player_z = 0.0
 player_x = 200.0
@@ -75,7 +77,7 @@ while running and time.time() - t0 < SECONDS:
         player_z = 0.0
     player_x = 200.0 * ((player_z / 4000.0) % 2.0 - 1.0)
 
-    game.draw_road(screen, bg, trk, player_z, player_x)
+    game.draw_road(screen, bg, backdrop, trk, palette, player_z, player_x)
     pygame.display.flip()
 
     frames += 1

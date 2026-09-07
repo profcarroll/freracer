@@ -19,9 +19,10 @@ designed by a self-hosted language model. Sibling project to
 - **Course designer:** `qwen3-coder:30b-a3b-q4_K_M` on the same free Oracle Ampere A1
   node (`sld-cloud`) used by fremarble. `tools/generate_track.py` prompts it, then
   validates the result with the game's own loader before anything is written.
-- **Co-authoring model:** Claude Sonnet 5 (via GitHub Copilot) — architecture, `.trk`
+- **Co-authoring models:** Claude Sonnet 5 (via GitHub Copilot) — architecture, `.trk`
   format, `game.py`, on-device testing/tuning, and the `generate_track.py` bridge to
-  `qwen3-coder`. Per the course's
+  `qwen3-coder`. Claude Opus 5 (via Claude Code) — session 3's renderer rebuild. Per the
+  course's
   [ATTRIBUTION.md](https://github.com/mfadt/sld-fall-2026/blob/main/ATTRIBUTION.md),
   every commit trailer names it.
 - **Status:** prototype plays on the device. One hand-built track (Autumn Hills, a Gran
@@ -81,11 +82,16 @@ next step if freracer needs to be distributed beyond this repo.
 
 The scanline road renderer draws up to `DRAW_DISTANCE` road bands per frame — the one
 number most likely to need tuning for a 600 MHz CPU, the way fremarble's marble physics
-constants were tuned from `tools/marble_fps.py` numbers instead of guessed. Measured on
-the actual device with `tools/racer_fps.py`: `DRAW_DISTANCE=160` gave 36 avg / 19 worst
-fps (rough, uneven), `120` gave ~50 avg / ~49 worst fps (smooth). `track.py` and
-`game.py` now default to 120. Re-run this if the road, sprite count, or theme changes
-enough to matter:
+constants were tuned from `tools/marble_fps.py` numbers instead of guessed.
+
+**The existing numbers are void and must be re-measured.** `DRAW_DISTANCE=160 → 36 fps`
+and `120 → ~50 fps` were measured against a renderer that was silently discarding every
+road band but one (see "Known behaviour" below), so they measured projection arithmetic
+with almost no rasterisation behind it. The corrected renderer halves the projections
+per frame (one per segment instead of two, since adjacent segments share an endpoint)
+and folds sub-pixel bands together (~120 candidate bands → ~55 drawn), but it is now
+actually filling polygons, so the cost is genuinely different in both directions. Run
+this on the device before trusting `DRAW_DISTANCE=120`:
 
 ```
 python2.5 tools/racer_fps.py 15 120   # seconds, draw_distance
@@ -134,24 +140,40 @@ this tool (bytes to atoms — a human carries it over with `scp`).
 
 ## Known behaviour / open questions
 
-- **First playtest (2026-09-07) found the game was not really playable**: steering used
-  fremarble's `raw_y` axis, which barely moves when the phone is held landscape for a
-  racer; the road was flat, low-contrast, and had no roadside detail, so it was hard to
-  tell where you were on it; and the vibrator sysfs path is root-only, so haptics never
-  actually fired when launched as `user` from the desktop. All three are now fixed (see
-  the corresponding commit and `game.py` comments): steering reads `raw_x`, measured live
-  on-device by rolling the phone and watching which axis actually moved; haptics go
-  through MCE's `req_vibrator_pattern_activate` D-Bus call instead of the sysfs file;
-  and `draw_road` now draws a banded, alternating-colour shoulder plus roadside marker
-  poles every 5 segments, on top of higher-contrast road paint. **Still needs a real
-  human playtest** to confirm it feels right - only bot-driven and render-only tests
-  have run so far.
-- **Physics constants are still starting points.** `DRAW_DISTANCE` (120) is tuned from
-  real `tools/racer_fps.py` numbers; with the new shoulder/pole rendering the full game
-  loop runs ~35-43 fps under sustained off-road bot steering (vs ~49 fps for bare-road
-  rendering in isolation) - stable, but re-run `racer_fps.py` and reconsider
-  `DRAW_DISTANCE` if more roadside detail is added. `MAX_SPEED`, `STEER_GAIN` and
-  `CENTRIFUGAL` are not yet tuned from a human play-test.
+- **The road was never being drawn at all** (found and fixed 2026-09-07, session 3).
+  Two independent bugs, either of which alone hides the road:
+  1. `draw_road` walked its segments far-to-near — the correct painter's order — while
+     keeping the near-to-far occlusion clip from the pseudo-3D renderer it was ported
+     from. That clip compares a band's far edge against the previous band's near edge,
+     but consecutive segments *share* that point: same segment dict, same z, so the same
+     float. `y2 >= max_y` was therefore true by equality on the second iteration and
+     every band nearer than the first was discarded. Exactly one band was drawn per
+     frame, 0.1px tall, at the horizon. Everything that looked like road surface was the
+     flat ground rectangle in the background surface — which is why two sessions of
+     tuning `ROAD_COLOR` changed nothing: that colour had never been on screen.
+  2. `track.py` integrates `curve` twice to bake an absolute centreline x into every
+     segment, so a long bend is constant angular *acceleration*: by segment 330 of
+     Autumn Hills the centreline is 22320 world units from the origin and pointing tens
+     of degrees off `+z`. `draw_road` set `cam_x = player_x` — an offset the physics
+     clamps to ±3 road widths — so on anything but the opening straight the camera was
+     aimed at empty space. The renderer now re-accumulates the centreline offset from
+     `curve` each frame starting at the camera, which is the standard treatment and
+     amounts to aiming the camera down the road's own tangent.
+
+  The same absolute-vs-relative confusion was in the collision tests, which added a
+  segment's absolute centreline x to an obstacle and compared it against a
+  centreline-relative `player_x`; both now compare in centreline-relative space.
+- **What the renderer draws now**: per-band full-width ground stripes (the periphery
+  motion cue — previously everything outside a narrow shoulder was one static colour),
+  red/white rumble strips, dashed lane markers, roadside marker posts every 5 segments,
+  and depth haze on all of it, pre-blended per distance at startup by `build_palette` so
+  the frame loop only indexes a list. Obstacle and traffic sprites take the same haze and
+  are drawn far-to-near.
+- **Physics constants are still starting points**, and none of the graphics work has been
+  seen on the device yet — it was verified by rendering frames through a software
+  rasteriser off-device. `MAX_SPEED`, `STEER_GAIN` and `CENTRIFUGAL` are not yet tuned
+  from a human play-test, and `DRAW_DISTANCE` needs a fresh `racer_fps.py` measurement
+  (see above).
 - **Traffic loops the lap on a timer, not a queue**: each `TRAFFIC` car's position is a
   pure function of race time and lap length, so it's always somewhere on the ribbon, but
   it does not react to the player or to other traffic.
