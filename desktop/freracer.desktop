@@ -1,0 +1,13 @@
+[Desktop Entry]
+Encoding=UTF-8
+Version=1.0
+Type=Application
+Name=freracer
+Comment=Pseudo-3D accelerometer racer
+Exec=/usr/bin/freracer
+Icon=freracer
+Categories=Games;
+X-Window-Icon=freracer
+X-HildonDesk-ShowInToolbar=true
+X-Osso-Type=application/x-executable
+StartupWMClass=freracer

@@ -284,13 +284,31 @@ def draw_car(screen, offset_frac):
     pygame.draw.rect(screen, (20, 20, 20), (cx + 30, cy + 10, 20, 12))
 
 
+def default_track_path():
+    # Picked when launched with no arguments at all, e.g. from the Maemo
+    # desktop icon: lowest-numbered .trk next to game.py is the "main" course.
+    here = os.path.dirname(os.path.abspath(__file__))
+    track_dir = os.path.join(here, 'tracks')
+    candidates = [f for f in os.listdir(track_dir) if f.endswith('.trk')]
+    candidates.sort()
+    if not candidates:
+        return None
+    return os.path.join(track_dir, candidates[0])
+
+
 def main():
     if len(sys.argv) < 2:
-        sys.stderr.write('usage: python2.5 game.py <track.trk> [tilt_source] [telemetry_csv] [timeout_s]\n')
-        return 2
-    track_path = sys.argv[1]
+        track_path = default_track_path()
+        if not track_path:
+            sys.stderr.write('usage: python2.5 game.py <track.trk> [tilt_source] [telemetry_csv] [timeout_s]\n')
+            return 2
+    else:
+        track_path = sys.argv[1]
     tilt_path = sys.argv[2] if len(sys.argv) > 2 else ACCEL_PATH
-    timeout_s = float(sys.argv[4]) if len(sys.argv) > 4 else 120.0
+    # No cap by default: a human race ends on 'finish' or 'quit'. The 4th arg
+    # is only for scripted/bot runs (bot_steer.py, tools/racer_fps.py) that
+    # need a hard stop if the bot never reaches the finish line.
+    timeout_s = float(sys.argv[4]) if len(sys.argv) > 4 else None
 
     trk = track.load(track_path)
     errors = track.validate(trk)
@@ -341,7 +359,7 @@ def main():
         while not outcome:
             frame_now = time.time()
             race_t = frame_now - t0
-            if race_t >= timeout_s:
+            if timeout_s is not None and race_t >= timeout_s:
                 outcome = 'timeout'
                 break
 

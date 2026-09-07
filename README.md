@@ -39,19 +39,43 @@ forward dimension (speed, braking zones, racing lines) and other agents on the t
 
 ## Running it on the N900
 
+From the Hildon desktop, tap the freracer icon (see "Launching from the Maemo desktop"
+below). From a shell:
+
 ```
 scp -r . root@<n900-ip>:/home/user/MyDocs/freracer
 ssh root@<n900-ip>
 cd /home/user/MyDocs/freracer
 export DISPLAY=:0
 python2.5 test_track.py                              # PASS: tracks/001-autumn-hills.trk
-python2.5 game.py tracks/001-autumn-hills.trk         # real accelerometer, 120 s limit
+python2.5 game.py tracks/001-autumn-hills.trk         # real accelerometer, no time limit
+python2.5 game.py                                    # same, but picks the lowest-numbered track in tracks/
 ```
 
-`game.py <track> [tilt_source] [telemetry_csv] [timeout_s]`. Hold the device the way you
-want to play for the first half-second: that angle becomes "straight ahead". Reach the
-finish line, run out of time, or touch the screen to end. The last line printed is always
+`game.py [track] [tilt_source] [telemetry_csv] [timeout_s]` — all arguments are optional.
+With no track given it plays the lowest-numbered `.trk` in `tracks/` (this is what the
+desktop launcher does). Hold the device the way you want to play for the first
+half-second: that angle becomes "straight ahead". Reach the finish line or touch the
+screen to end; there is no time limit for human play (the 4th, `timeout_s`, argument is
+only for scripted bot runs that might otherwise never reach the finish line — see below).
+The last line printed is always
 `RESULT outcome=... elapsed=... hits=... par=... frames=... avg_fps=...`.
+
+### Launching from the Maemo desktop
+
+`desktop/` holds a real Hildon app-grid entry: `freracer.desktop`, a `/usr/bin/freracer`
+launcher script (cds into the install directory, runs untimed, logs to
+`freracer.log`), and a 64×64 icon. Install once, as root, after the repo is on the
+device at `/home/user/MyDocs/freracer`:
+
+```
+ssh root@<n900-ip> 'sh /home/user/MyDocs/freracer/desktop/install.sh'
+```
+
+freracer then shows up under Games in the app grid like any other installed game — no
+terminal required to play. This is a from-source install (`install(1)` copying three
+files into place), not a `.deb`/Application Manager package; that would be the natural
+next step if freracer needs to be distributed beyond this repo.
 
 ### Checking render performance first
 
@@ -105,6 +129,7 @@ this tool (bytes to atoms — a human carries it over with `scp`).
 | `bot_steer.py` | scripted tilt writer, same convention as fremarble's `bot_tilt.py` |
 | `tools/racer_fps.py` | frame-rate probe for the road renderer, run on-device first |
 | `tools/generate_track.py` | prompts `qwen3-coder` on `sld-cloud` for new tracks, validates output |
+| `desktop/` | Hildon app-grid launcher: `.desktop` entry, `/usr/bin/freracer` script, icon, `install.sh` |
 | `.github/copilot-instructions.md` | the Python 2.5 bootstrap every model gets |
 
 ## Known behaviour / open questions

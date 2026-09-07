@@ -1,0 +1,10 @@
+#!/bin/sh
+# Maemo/Hildon desktop launcher for freracer. Installed as /usr/bin/freracer
+# by desktop/install.sh; invoked with no arguments by the .desktop entry, so
+# game.py's default_track_path() picks the lowest-numbered track and runs
+# untimed (see game.py main()).
+set -e
+GAMEDIR=/home/user/MyDocs/freracer
+LOG="$GAMEDIR/freracer.log"
+cd "$GAMEDIR"
+exec python2.5 game.py >>"$LOG" 2>&1
