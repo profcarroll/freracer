@@ -91,10 +91,22 @@ FOG_STRENGTH = 0.72          # how far the furthest band goes toward the haze
 FOG_CURVE = 2.0               # >1 keeps near ground crisp and fades late
 
 # A band shorter than this is folded into the next one rather than drawn.
-# Near the horizon dozens of segments land on the same scanline; giving each
-# its own polygons buys nothing visible. Measured on 001-autumn-hills: this
-# takes a frame from ~117 drawn bands to ~62, identical output.
-MIN_BAND_HEIGHT = 1.0
+# Near the horizon dozens of segments land on the same scanline and giving
+# each its own polygons buys nothing visible.
+#
+# This, not DRAW_DISTANCE, is the frame-rate dial. The renderer is bound by
+# pygame draw calls per frame, not by pixels: measured on the device at
+# DRAW_DISTANCE=120, min band height 1 -> 22.0 fps, 2 -> 24.5, 3 -> 26.5,
+# 4 -> 27.6. DRAW_DISTANCE is a much blunter instrument by comparison
+# (120 -> 26.4, 100 -> 27.7, 80 -> 29.5 at min band height 3) and it costs
+# lookahead, which is what makes a corner readable at speed - 120 segments is
+# two seconds of road at MAX_SPEED. Raising this instead costs only how
+# finely the distant road is sliced, which the depth haze hides anyway.
+#
+# Do not raise it much past 3 without driving it: this quantises *which*
+# segments get drawn, so as the camera moves the choice changes, and a coarse
+# threshold can make the road stripes pop. That does not show up in a still.
+MIN_BAND_HEIGHT = 3.0
 
 # Nothing closer than this is projected. The near edge of the band the camera
 # is standing in has dz ~ 0, and a point at dz -> 0 runs off along a fixed
@@ -471,7 +483,6 @@ def draw_road(screen, bg, backdrop, trk, palette, player_z, player_x):
     """
     band_pal = palette[0]
     pole_pal = palette[1]
-    screen.blit(bg, (0, 0))
     segments = trk['segments']
     n = len(segments)
 
@@ -491,17 +502,6 @@ def draw_road(screen, bg, backdrop, trk, palette, player_z, player_x):
     # road was simply not in frame. Placing the camera on the centreline is
     # also what makes a bend read as a bend - the road ahead diverges from
     # the camera's fixed heading and sweeps across the screen.
-    # The camera looks down the centreline's tangent (see road_x below), so
-    # the scenery pans by that tangent's heading. track.py's baked centreline
-    # x is useless to project against, but its first difference *is* that
-    # heading - the one thing it is good for.
-    bw = backdrop.get_width()
-    pan = int(-(segments[base_index + 1]['x'] - segments[base_index]['x'])
-              * BACKDROP_PAN) % bw
-    btop = HORIZON_Y - BACKDROP_H
-    screen.blit(backdrop, (pan - bw, btop))
-    screen.blit(backdrop, (pan, btop))
-
     _, player_y, _, _ = track.segment_at(trk, player_z)
     cam_y = player_y + CAMERA_HEIGHT
     cam_z = player_z
@@ -552,6 +552,29 @@ def draw_road(screen, bg, backdrop, trk, palette, player_z, player_x):
         fy = half_h - s * (b['y'] - cam_y) * half_h
         fw = s * b['width'] * half_w
 
+        # Marker posts are emitted before the band test, not inside it.
+        # Whether a segment earns its own road band is a rasterisation
+        # question - MIN_BAND_HEIGHT, tuned for frame rate - and tying the
+        # roadside furniture to it meant raising that threshold silently
+        # thinned the posts out with distance, losing the strongest cue for
+        # how fast the road is going past.
+        if idx % POLE_INTERVAL == 0:
+            # Derived from the projection already in hand rather than
+            # re-projecting the post's base and top: same scale factor, so
+            # the post's screen height is just its world height times s.
+            ph = s * POLE_HEIGHT * half_h
+            if ph >= 2.0:
+                pb = fw * (POLE_HALF_WIDTH / b['width'])
+                if pb < 1.0:
+                    pb = 1.0
+                pc = pole_pal[i][(idx // POLE_INTERVAL) % 2]
+                po = fw * POLE_OFFSET
+                ptop = int(fy - ph)
+                pwide = int(pb * 2.0)
+                phigh = int(ph)
+                poles.append((pc, int(fx - po - pb), ptop, pwide, phigh))
+                poles.append((pc, int(fx + po - pb), ptop, pwide, phigh))
+
         # Behind a crest, or too short to earn its own polygons. Either way
         # leave the near edge where it is, so this segment is folded into
         # whichever band next clears the test and no gap opens up.
@@ -563,11 +586,28 @@ def draw_road(screen, bg, backdrop, trk, palette, player_z, player_x):
 
         # One full-width ground stripe per band. This is the periphery motion
         # cue: everything outside a narrow shoulder used to be a single static
-        # colour, so nothing but the road itself could read as moving. A Rect
-        # fill is the cheapest primitive SDL has - cheaper than the shoulder
-        # polygon it replaces, and it covers the entire screen width.
+        # colour, so nothing but the road itself could read as moving.
+        #
+        # The height is deliberately int(ny) - top, with no +1. Bands are
+        # drawn near to far and band k's near edge is bit-identical to band
+        # k-1's far edge, so a +1 made every band repaint the top row of the
+        # band in front of it - a row the nearer band had already, correctly,
+        # filled with road. The result was a full-width grass line punched
+        # through the road at every band boundary, which in the middle
+        # distance shredded the surface into alternating road and grass. It
+        # read as "the road is the wrong colour". Without the +1 the stripes
+        # tile exactly: [int(fy), int(ny)-1] then [int(ny), ...].
+        #
+        # One wide fill, not two narrow ones flanking the road. Filling the
+        # pixels the road is about to cover is pure waste, but this device
+        # charges by the draw call, not by the pixel: splitting this fill and
+        # the rumble below into left/right halves saved ~440k pixels a frame
+        # and cost 98 extra calls, and measured 22.0 -> 18.5 fps at
+        # DRAW_DISTANCE=120. Fewer, bigger primitives win here.
         top = int(fy)
-        screen.fill(pal[0], (0, top, W, int(ny) - top + 1))
+        height = int(ny) - top
+        if height > 0:
+            screen.fill(pal[0], (0, top, W, height))
 
         rn = nw * RUMBLE_ZONE
         rf = fw * RUMBLE_ZONE
@@ -582,32 +622,43 @@ def draw_road(screen, bg, backdrop, trk, palette, player_z, player_x):
             pygame.draw.polygon(screen, pal[3], (
                 (nx - ln, ny), (nx + ln, ny), (fx + lf, fy), (fx - lf, fy)))
 
-        if idx % POLE_INTERVAL == 0:
-            # Derived from the projection already in hand rather than
-            # re-projecting the post\'s base and top: same scale factor, so
-            # the post\'s screen height is just its world height times s.
-            ph = s * POLE_HEIGHT * half_h
-            if ph >= 2.0:
-                pb = fw * (POLE_HALF_WIDTH / b['width'])
-                if pb < 1.0:
-                    pb = 1.0
-                pc = pole_pal[i][(idx // POLE_INTERVAL) % 2]
-                po = fw * POLE_OFFSET
-                ptop = int(fy - ph)
-                pwide = int(pb * 2.0)
-                phigh = int(ph)
-                poles.append((pc, int(fx - po - pb), ptop, pwide, phigh))
-                poles.append((pc, int(fx + po - pb), ptop, pwide, phigh))
-
         nx = fx
         ny = fy
         nw = fw
         i += 1
 
+    # Sky and scenery go in last, clipped to the rows the road did not reach.
+    # The bands tile from the topmost far edge down to the bottom of the
+    # screen and each one paints its own rows opaquely, so a full-screen
+    # background blit before the walk was drawing ~190k pixels a frame that
+    # were then painted over - about a fifth of the frame\'s whole fill budget
+    # on a device with no blitter. Measured 22 fps at DRAW_DISTANCE=120 before
+    # this; the road is fill-rate bound, not band-count bound (dropping the
+    # draw distance from 120 to 50 was worth only 6 fps, because the bands
+    # cover the same screen area either way).
+    top_y = int(ny)
+    if top_y > 0:
+        if top_y > H:
+            top_y = H
+        screen.set_clip((0, 0, W, top_y))
+        screen.blit(bg, (0, 0))
+        # The camera looks down the centreline\'s tangent (see road_x above),
+        # so the scenery pans by that tangent\'s heading. track.py\'s baked
+        # centreline x is useless to project against, but its first difference
+        # *is* that heading - the one thing it is good for.
+        bw = backdrop.get_width()
+        pan = int(-(segments[base_index + 1]['x'] - segments[base_index]['x'])
+                  * BACKDROP_PAN) % bw
+        btop = HORIZON_Y - BACKDROP_H
+        screen.blit(backdrop, (pan - bw, btop))
+        screen.blit(backdrop, (pan, btop))
+        screen.set_clip(None)
+
     # Posts go in a second pass, far to near. A post stands *above* its own
     # band\'s far edge, which is territory the next band\'s ground stripe
     # paints over, so drawing them inline during a near-to-far walk would
-    # bury every post except the last one.
+    # bury every post except the last one. They come after the sky so a near
+    # post may stand above the horizon.
     j = len(poles) - 1
     while j >= 0:
         p = poles[j]

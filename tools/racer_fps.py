@@ -3,7 +3,7 @@
 # rumble strips, lane markers, obstacle/traffic sprites) with no sensor reads, so it
 # isolates render cost the way marble_fps.py isolated marble-physics cost in fremarble.
 #
-#   python2.5 tools/racer_fps.py [seconds] [draw_distance]
+#   python2.5 tools/racer_fps.py [seconds] [draw_distance] [min_band_height]
 #
 # Writes a per-second fps log next to itself and prints a one-line summary. Run this
 # on the device first and use the worst-second fps to pick DRAW_DISTANCE in game.py
@@ -22,6 +22,11 @@ SECONDS = float(sys.argv[1]) if len(sys.argv) > 1 else 15.0
 if len(sys.argv) > 2:
     track.DRAW_DISTANCE = int(sys.argv[2])
     game.DRAW_DISTANCE = int(sys.argv[2])
+# The renderer is bound by pygame draw calls per frame, not by pixels (see
+# game.draw_road), and MIN_BAND_HEIGHT is the direct control on how many bands
+# earn their own calls - so it is worth sweeping here alongside DRAW_DISTANCE.
+if len(sys.argv) > 3:
+    game.MIN_BAND_HEIGHT = float(sys.argv[3])
 
 LOG = os.path.join(os.path.dirname(__file__), 'racer_fps.csv')
 
@@ -94,5 +99,5 @@ while running and time.time() - t0 < SECONDS:
 elapsed = time.time() - t0
 log.close()
 pygame.quit()
-print 'draw_distance=%d frames=%d elapsed=%.1fs avg_fps=%.1f worst_second_fps=%.1f log=%s' % (
-    track.DRAW_DISTANCE, frames, elapsed, frames / elapsed, worst, LOG)
+print 'draw_distance=%d min_band_h=%.1f frames=%d elapsed=%.1fs avg_fps=%.1f worst_second_fps=%.1f log=%s' % (
+    track.DRAW_DISTANCE, game.MIN_BAND_HEIGHT, frames, elapsed, frames / elapsed, worst, LOG)

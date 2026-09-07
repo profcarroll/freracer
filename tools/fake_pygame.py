@@ -45,6 +45,7 @@ class Surface(object):
         self.w, self.h = int(size[0]), int(size[1])
         self.buf = bytearray(self.w * self.h * 3)
         self.calls = {'fill': 0, 'polygon': 0, 'line': 0, 'rect': 0, 'blit': 0}
+        self.clip = None
 
     def convert(self):
         return self
@@ -55,9 +56,22 @@ class Surface(object):
     def get_height(self):
         return self.h
 
+    def set_clip(self, rect=None):
+        self.clip = None if rect is None else (
+            rect if isinstance(rect, Rect) else Rect(rect))
+
+    def get_clip(self):
+        return self.clip if self.clip is not None else Rect(0, 0, self.w, self.h)
+
     def _span(self, y, x0, x1, c):
         if y < 0 or y >= self.h:
             return
+        cl = self.clip
+        if cl is not None:
+            if y < cl.y or y >= cl.y + cl.h:
+                return
+            x0 = max(x0, cl.x)
+            x1 = min(x1, cl.x + cl.w)
         x0 = max(0, int(x0))
         x1 = min(self.w, int(x1))
         if x1 <= x0:
@@ -79,12 +93,16 @@ class Surface(object):
     def blit(self, other, pos, area=None):
         self.calls['blit'] += 1
         dx, dy = int(pos[0]), int(pos[1])
+        cl = self.clip
         sy = 0
         while sy < other.h:
             ty = dy + sy
-            if 0 <= ty < self.h:
+            if 0 <= ty < self.h and (cl is None or cl.y <= ty < cl.y + cl.h):
                 x0 = max(0, dx)
                 x1 = min(self.w, dx + other.w)
+                if cl is not None:
+                    x0 = max(x0, cl.x)
+                    x1 = min(x1, cl.x + cl.w)
                 if x1 > x0:
                     so = (sy * other.w + (x0 - dx)) * 3
                     to = (ty * self.w + x0) * 3

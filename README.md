@@ -101,18 +101,42 @@ The scanline road renderer draws up to `DRAW_DISTANCE` road bands per frame — 
 number most likely to need tuning for a 600 MHz CPU, the way fremarble's marble physics
 constants were tuned from `tools/marble_fps.py` numbers instead of guessed.
 
-**The existing numbers are void and must be re-measured.** `DRAW_DISTANCE=160 → 36 fps`
-and `120 → ~50 fps` were measured against a renderer that was silently discarding every
-road band but one (see "Known behaviour" below), so they measured projection arithmetic
-with almost no rasterisation behind it. The corrected renderer halves the projections
-per frame (one per segment instead of two, since adjacent segments share an endpoint)
-and folds sub-pixel bands together (~120 candidate bands → ~55 drawn), but it is now
-actually filling polygons, so the cost is genuinely different in both directions. Run
-this on the device before trusting `DRAW_DISTANCE=120`:
+```
+python2.5 tools/racer_fps.py 15 120 3   # seconds, draw_distance, min_band_height
+```
 
-```
-python2.5 tools/racer_fps.py 15 120   # seconds, draw_distance
-```
+**The renderer is bound by pygame draw calls per frame, not by pixels.** This is the
+single most useful thing to know before optimising it, and it is counter-intuitive
+enough that it was got wrong once already: splitting the ground fill and the rumble
+strip into left/right halves saved roughly 440k pixels a frame and cost 98 extra draw
+calls, and measured **22.0 → 18.5 fps**. Fewer, bigger primitives win. A draw call
+costs on the order of 90 µs here.
+
+So `MIN_BAND_HEIGHT`, not `DRAW_DISTANCE`, is the frame-rate dial — it controls how many
+bands earn their own calls without shortening the road. Measured on the device
+(`001-autumn-hills`, sustained motion):
+
+| | fps (avg / worst second) |
+|---|---|
+| `DRAW_DISTANCE=120`, `MIN_BAND_HEIGHT=1` | 22.0 / 20.7 |
+| `DRAW_DISTANCE=120`, `MIN_BAND_HEIGHT=2` | 24.5 / 23.9 |
+| **`DRAW_DISTANCE=120`, `MIN_BAND_HEIGHT=3`** (shipping) | **26.9 / 25.5** |
+| `DRAW_DISTANCE=120`, `MIN_BAND_HEIGHT=4` | 27.6 / 27.1 |
+| `DRAW_DISTANCE=100`, `MIN_BAND_HEIGHT=3` | 27.7 / 27.1 |
+| `DRAW_DISTANCE=80`, `MIN_BAND_HEIGHT=3` | 29.5 / 28.8 |
+
+`DRAW_DISTANCE` stays at 120 because it buys lookahead — 120 segments is two seconds of
+road at `MAX_SPEED`, which is what makes a corner readable — and dropping it to 100 is
+worth only 1.3 fps. The full game loop runs slower than the render probe: **~22 fps**
+bot-driven, the difference being physics, sprites and telemetry.
+
+Don't raise `MIN_BAND_HEIGHT` much past 3 without driving it. It quantises *which*
+segments get drawn, so the choice changes as the camera moves, and a coarse threshold
+can make the road stripes pop — which no still frame will show you.
+
+The old numbers (`160 → 36 fps`, `120 → ~50 fps`) are void: they were measured against a
+renderer that was discarding every road band but one, so they timed projection
+arithmetic with almost no rasterisation behind it.
 
 ### Looking at a frame without the device
 
