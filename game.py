@@ -45,26 +45,30 @@ THEMES = {
     'autumn-hills': {
         'sky': (255, 178, 102),
         'sky2': (255, 214, 153),
-        'grass': (90, 110, 40),
-        'grass2': (104, 128, 46),
+        'grass': (150, 95, 35),      # warm amber/fall foliage - was a muted
+        'grass2': (172, 115, 45),    # olive green too close to the road's grey
     },
     'dusk-city': {
         'sky': (40, 30, 70),
         'sky2': (90, 60, 110),
-        'grass': (30, 30, 34),
-        'grass2': (36, 36, 40),
+        'grass': (55, 40, 80),       # dusky purple - was a near-neutral dark
+        'grass2': (68, 50, 95),      # grey, almost indistinguishable from the road
     },
     'coast': {
         'sky': (140, 200, 235),
         'sky2': (190, 225, 245),
-        'grass': (60, 140, 90),
-        'grass2': (70, 150, 100),
+        'grass': (40, 165, 95),
+        'grass2': (55, 180, 110),
     },
 }
 DEFAULT_THEME = 'autumn-hills'
 
-ROAD_COLOR = (60, 60, 66)
-ROAD_COLOR2 = (100, 100, 108)
+# Road paint is a deliberately dark, neutral, low-saturation grey so it reads
+# as "road" against any of the (now much more saturated/hued) theme grounds
+# above - the first version's road/grass colours were close enough in both
+# hue and luminance that playtest feedback was "the road is not visible".
+ROAD_COLOR = (42, 42, 46)
+ROAD_COLOR2 = (60, 60, 66)
 RUMBLE_LIGHT = (200, 60, 60)
 RUMBLE_DARK = (230, 230, 230)
 LANE_COLOR = (230, 220, 60)
@@ -136,32 +140,52 @@ VIBRATOR_PATTERNS = {
 }
 
 
-def buzz_pattern(name):
+def start_buzz_helper():
     # /sys/class/leds/twl4030:vibrator/brightness (write_vibrator, above) is
     # root-only (0644, root:root); a game launched from the Hildon desktop
     # runs as the unprivileged 'user' account and silently can't write it -
-    # haptics never actually fired. write_vibrator() is kept only in case a
-    # future root-run mode wants it. The permission-safe path is MCE's own
-    # vibrator-pattern D-Bus API, which 'user' can call directly (verified:
-    # req_vibrator_pattern_activate works unprivileged). Patterns are
-    # named/fixed (see /etc/mce/mce.ini [VibraPatternRX51]) rather than
-    # arbitrary durations, so events are mapped to the closest-feeling
-    # built-in pattern instead of a custom on/off timing.
+    # haptics never actually fired. The permission-safe path is MCE's own
+    # vibrator-pattern D-Bus API (verified callable as 'user'). A first
+    # attempt called `dbus-send` via subprocess.Popen directly from here on
+    # every event; that forks the whole pygame-loaded game process, which
+    # measurably stalled the frame loop on real hardware (playtest: "freezes
+    # with rumbles" - sustained rumble-strip contact kept re-triggering the
+    # fork every 0.35s). Spawning one small, idle buzz_helper.py process here
+    # - before pygame/track surfaces grow this process - means later forks
+    # happen inside that small helper instead, which is cheap.
+    here = os.path.dirname(os.path.abspath(__file__))
+    helper_path = os.path.join(here, 'buzz_helper.py')
     try:
-        subprocess.Popen((
-            'dbus-send', '--system', '--type=method_call',
-            '--dest=com.nokia.mce', '/com/nokia/mce/request',
-            'com.nokia.mce.request.req_vibrator_pattern_activate',
-            'string:' + name,
-        ), stdout=DEVNULL, stderr=DEVNULL)
+        return subprocess.Popen(('python2.5', helper_path),
+                                 stdin=subprocess.PIPE,
+                                 stdout=DEVNULL, stderr=DEVNULL)
+    except Exception:
+        return None
+
+
+def buzz_pattern(helper, name):
+    if not helper:
+        return
+    try:
+        helper.stdin.write(name + '\n')
+        helper.stdin.flush()
     except Exception:
         pass
 
 
-def buzz_event(event_name):
+def buzz_event(helper, event_name):
     pattern = VIBRATOR_PATTERNS.get(event_name)
     if pattern:
-        buzz_pattern(pattern)
+        buzz_pattern(helper, pattern)
+
+
+def stop_buzz_helper(helper):
+    if not helper:
+        return
+    try:
+        helper.stdin.close()
+    except Exception:
+        pass
 
 
 
@@ -391,6 +415,10 @@ def main():
 
     telemetry_path = sys.argv[3] if len(sys.argv) > 3 else default_telemetry_path(track_path, trk)
 
+    # Spawned before pygame.init() / display setup on purpose - see
+    # start_buzz_helper()'s comment.
+    buzz_helper = start_buzz_helper()
+
     pygame.init()
     pygame.mouse.set_visible(False)
     screen = pygame.display.set_mode((W, H), pygame.FULLSCREEN, 16)
@@ -559,11 +587,11 @@ def main():
                     pending_event = 'hit-' + tkind
 
                 if buzz_key:
-                    buzz_event(buzz_key)
+                    buzz_event(buzz_helper, buzz_key)
 
             if player_z >= trk['lap_length']:
                 outcome = 'finish'
-                buzz_event('finish')
+                buzz_event(buzz_helper, 'finish')
 
             base_index, cam_x, cam_y, cam_z = draw_road(screen, bg, trk, player_z, player_x)
 
@@ -627,7 +655,9 @@ def main():
     finally:
         # Patterns are self-terminating (fixed repeat counts, see mce.ini), but
         # explicitly deactivate on any exit path (including exceptions) so a
-        # crash mid-pattern can't leave the vibrator buzzing after quit.
+        # crash mid-pattern can't leave the vibrator buzzing after quit. This
+        # runs once at shutdown, not per-frame, so forking directly here
+        # (rather than through the helper, which we're closing anyway) is fine.
         for pattern_name in set(VIBRATOR_PATTERNS.values()):
             try:
                 subprocess.Popen((
@@ -638,6 +668,7 @@ def main():
                 ), stdout=DEVNULL, stderr=DEVNULL)
             except Exception:
                 pass
+        stop_buzz_helper(buzz_helper)
 
 
 if __name__ == '__main__':
