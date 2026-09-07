@@ -97,6 +97,21 @@ this on the device before trusting `DRAW_DISTANCE=120`:
 python2.5 tools/racer_fps.py 15 120   # seconds, draw_distance
 ```
 
+### Looking at a frame without the device
+
+The N900 is the only machine in the project with pygame on it, which is how a renderer
+that drew one band per frame survived two sessions of colour tuning. `render_shot.py`
+runs `game.py`'s draw path against a software rasteriser (`tools/fake_pygame.py`) and
+writes PNGs, so "does this frame look right" is answerable from the laptop:
+
+```
+python3 tools/render_shot.py tracks/001-autumn-hills.trk --frames 6 --out /tmp/shots
+python3 tools/render_shot.py tracks/002-night-circuit.trk --at 4000 --offset -400
+```
+
+It renders correctness, not speed — it says nothing about frame rate, and nothing about
+how the colours read on a resistive LCD outdoors. Both of those still need the device.
+
 ### Playing it with a bot
 
 Tilt is read every frame from one file, exactly like fremarble:
@@ -134,6 +149,7 @@ this tool (bytes to atoms — a human carries it over with `scp`).
 | `telemetry.py` | 10 Hz CSV writer (z, speed, lateral offset, tilt, event) |
 | `bot_steer.py` | scripted tilt writer, same convention as fremarble's `bot_tilt.py` |
 | `tools/racer_fps.py` | frame-rate probe for the road renderer, run on-device first |
+| `tools/render_shot.py`, `tools/fake_pygame.py` | render frames to PNG off-device, to check a rendering change before carrying it over |
 | `tools/generate_track.py` | prompts `qwen3-coder` on `sld-cloud` for new tracks, validates output |
 | `desktop/` | Hildon app-grid launcher: `.desktop` entry, `/usr/bin/freracer` script, icon, `install.sh` |
 | `.github/copilot-instructions.md` | the Python 2.5 bootstrap every model gets |

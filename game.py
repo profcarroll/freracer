@@ -87,7 +87,7 @@ POLE_HEIGHT = 260.0
 # Depth shading. Blending eight band colours per band per frame in Python on a
 # 600 MHz CPU is not affordable, so build_palette() blends every colour at
 # every distance once, at startup, and the frame loop just indexes the result.
-FOG_STRENGTH = 0.85           # how far the furthest band goes toward the haze
+FOG_STRENGTH = 0.72          # how far the furthest band goes toward the haze
 FOG_CURVE = 2.0               # >1 keeps near ground crisp and fades late
 
 # A band shorter than this is folded into the next one rather than drawn.
