@@ -1,0 +1,6 @@
+*.pyc
+*.pyo
+__pycache__/
+telemetry/*.csv
+tools/racer_fps.csv
+*.candidate

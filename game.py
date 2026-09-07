@@ -1,0 +1,530 @@
+import math
+import os
+import re
+import sys
+import time
+import pygame
+import track
+from telemetry import Telemetry
+
+ACCEL_PATH = '/sys/class/i2c-adapter/i2c-3/3-001d/coord'
+VIBRATOR = '/sys/class/leds/twl4030:vibrator/brightness'
+
+W = track.SCREEN_W
+H = track.SCREEN_H
+SEGMENT_LENGTH = track.SEGMENT_LENGTH
+DRAW_DISTANCE = track.DRAW_DISTANCE
+CAMERA_HEIGHT = track.CAMERA_HEIGHT
+CAMERA_DEPTH = 1.0 / math.tan((track.FIELD_OF_VIEW / 2.0) * math.pi / 180.0)
+
+# --- steering / calibration (same convention as fremarble: raw_y adjusted by
+# the level reading at startup drives left/right motion) ---
+CALIBRATION_WINDOW = 0.5
+TILT_DEAD_ZONE = 40.0
+STEER_GAIN = 5.0          # world units/sec of lateral speed per milli-g at full speed
+STEER_MIN_SPEED_FRAC = 0.15
+
+# --- forward driving model: always-accelerating arcade feel, brake optional ---
+MAX_SPEED = 6000.0        # world units / sec
+ACCEL = 2400.0            # units/sec^2 toward MAX_SPEED
+BRAKE_DECEL = 5200.0
+OFFROAD_MAX_SPEED = MAX_SPEED * 0.45
+CENTRIFUGAL = 0.0007      # curve pulls the car outward, proportional to speed
+CAR_HALF_WIDTH = 120.0
+OBSTACLE_HALF_WIDTH = 110.0
+HIT_SPEED_SCALE = 0.35    # speed multiplier on obstacle/traffic collision
+
+RUMBLE_ZONE = 1.12        # fraction of half-width where the rumble strip starts
+GRASS_ZONE = 1.35         # fraction of half-width beyond which is grass (hard penalty)
+
+THEMES = {
+    'autumn-hills': {
+        'sky': (255, 178, 102),
+        'sky2': (255, 214, 153),
+        'grass': (90, 110, 40),
+        'grass2': (104, 128, 46),
+    },
+    'dusk-city': {
+        'sky': (40, 30, 70),
+        'sky2': (90, 60, 110),
+        'grass': (30, 30, 34),
+        'grass2': (36, 36, 40),
+    },
+    'coast': {
+        'sky': (140, 200, 235),
+        'sky2': (190, 225, 245),
+        'grass': (60, 140, 90),
+        'grass2': (70, 150, 100),
+    },
+}
+DEFAULT_THEME = 'autumn-hills'
+
+ROAD_COLOR = (80, 80, 84)
+ROAD_COLOR2 = (90, 90, 94)
+RUMBLE_LIGHT = (200, 60, 60)
+RUMBLE_DARK = (230, 230, 230)
+LANE_COLOR = (230, 220, 60)
+
+OBSTACLE_COLORS = {
+    'rock': (110, 105, 100),
+    'cone': (230, 120, 30),
+    'barrier': (220, 40, 40),
+    'tree-stump': (110, 70, 40),
+}
+TRAFFIC_COLORS = {
+    'sedan': (60, 90, 200),
+    'truck': (200, 200, 60),
+    'tractor': (60, 160, 60),
+}
+
+
+def sanitize_name(name):
+    s = re.sub('[^a-z0-9]+', '-', name.lower()).strip('-')
+    return s or 'track'
+
+
+def default_telemetry_path(track_path, trk):
+    base = trk.get('name', '')
+    if not base:
+        base = os.path.splitext(os.path.basename(track_path))[0]
+    base = sanitize_name(base)
+    d = 'telemetry'
+    if not os.path.isdir(d):
+        os.makedirs(d)
+    return os.path.join(d, base + '-' + str(int(time.time())) + '.csv')
+
+
+def read_tilt(path, last):
+    try:
+        f = open(path, 'r')
+        try:
+            s = f.read()
+        finally:
+            f.close()
+        parts = s.split()
+        return int(parts[0]), int(parts[1]), int(parts[2])
+    except Exception:
+        return last
+
+
+def write_vibrator(value):
+    try:
+        f = open(VIBRATOR, 'w')
+        try:
+            f.write(value)
+        finally:
+            f.close()
+    except Exception:
+        pass
+
+
+def buzz_vibrator(now, duration_ms, vibrate_until, vibrator_on):
+    until = now + duration_ms / 1000.0
+    if until > vibrate_until:
+        vibrate_until = until
+    if not vibrator_on:
+        write_vibrator('255')
+        vibrator_on = 1
+    return vibrate_until, vibrator_on
+
+
+def update_vibrator(now, vibrate_until, vibrator_on):
+    if vibrator_on and now >= vibrate_until:
+        write_vibrator('0')
+        vibrator_on = 0
+    return vibrator_on
+
+
+def project(world_x, world_y, world_z, cam_x, cam_y, cam_z, road_width):
+    dz = world_z - cam_z
+    if dz < 1.0:
+        dz = 1.0
+    scale = CAMERA_DEPTH / dz
+    screen_x = (W / 2.0) + scale * (world_x - cam_x) * (W / 2.0)
+    screen_y = (H / 2.0) - scale * (world_y - cam_y) * (H / 2.0)
+    screen_w = scale * road_width * (W / 2.0)
+    return screen_x, screen_y, screen_w, scale
+
+
+def build_theme_background(theme_name):
+    theme = THEMES.get(theme_name, THEMES[DEFAULT_THEME])
+    bg = pygame.Surface((W, H)).convert()
+    horizon = H / 2
+    i = 0
+    while i < horizon:
+        t = i / float(horizon)
+        r = int(theme['sky'][0] + (theme['sky2'][0] - theme['sky'][0]) * t)
+        g = int(theme['sky'][1] + (theme['sky2'][1] - theme['sky'][1]) * t)
+        b = int(theme['sky'][2] + (theme['sky2'][2] - theme['sky'][2]) * t)
+        pygame.draw.line(bg, (r, g, b), (0, i), (W, i))
+        i += 1
+    pygame.draw.rect(bg, theme['grass'], (0, horizon, W, H - horizon))
+    return bg
+
+
+def traffic_world_z(base_z, speed, t, lap_length):
+    z = base_z + speed * t
+    if lap_length > 0.0:
+        z = z % lap_length
+    return z
+
+
+def find_obstacle_hit(obstacles, player_z, player_x, trk, hit_flags):
+    i = 0
+    while i < len(obstacles):
+        seg_i, offset, kind = obstacles[i]
+        if not hit_flags[i]:
+            obs_z = seg_i * SEGMENT_LENGTH + SEGMENT_LENGTH / 2.0
+            if abs(player_z - obs_z) < SEGMENT_LENGTH:
+                _, _, width, cx = track.segment_at(trk, obs_z)
+                obs_x = cx + offset * width
+                if abs(player_x - obs_x) < (CAR_HALF_WIDTH + OBSTACLE_HALF_WIDTH):
+                    hit_flags[i] = 1
+                    return i, kind
+        i += 1
+    return -1, None
+
+
+def find_traffic_hit(traffic, player_z, player_x, t, trk, cooldowns):
+    i = 0
+    while i < len(traffic):
+        seg_i, offset, speed, kind = traffic[i]
+        base_z = seg_i * SEGMENT_LENGTH
+        car_z = traffic_world_z(base_z, speed, t, trk['lap_length'])
+        if cooldowns[i] <= 0.0 and abs(player_z - car_z) < SEGMENT_LENGTH * 0.8:
+            _, _, width, cx = track.segment_at(trk, car_z)
+            car_x = cx + offset * width
+            if abs(player_x - car_x) < (CAR_HALF_WIDTH + OBSTACLE_HALF_WIDTH):
+                cooldowns[i] = 2.0
+                return i, kind
+        i += 1
+    return -1, None
+
+
+def draw_road(screen, bg, trk, player_z, player_x):
+    screen.blit(bg, (0, 0))
+    segments = trk['segments']
+    n = len(segments)
+
+    base_index = int(player_z / SEGMENT_LENGTH)
+    if base_index >= n - 1:
+        base_index = n - 2
+    if base_index < 0:
+        base_index = 0
+
+    _, player_y, _, _ = track.segment_at(trk, player_z)
+    cam_x = player_x
+    cam_y = player_y + CAMERA_HEIGHT
+    cam_z = player_z
+
+    max_y = H
+    i = DRAW_DISTANCE - 1
+    while i >= 0:
+        idx = base_index + i
+        if idx >= n - 1:
+            i -= 1
+            continue
+        a = segments[idx]
+        b = segments[idx + 1]
+        z1 = idx * SEGMENT_LENGTH
+        z2 = (idx + 1) * SEGMENT_LENGTH
+        if z2 <= cam_z:
+            i -= 1
+            continue
+
+        x1, y1, w1, s1 = project(a['x'], a['y'], z1, cam_x, cam_y, cam_z, a['width'])
+        x2, y2, w2, s2 = project(b['x'], b['y'], z2, cam_x, cam_y, cam_z, b['width'])
+
+        if y2 >= y1 or y2 >= max_y:
+            i -= 1
+            continue
+
+        band = (idx // 3) % 2
+        road_color = ROAD_COLOR if band == 0 else ROAD_COLOR2
+        rumble_color = RUMBLE_LIGHT if band == 0 else RUMBLE_DARK
+
+        rw1 = w1 * RUMBLE_ZONE
+        rw2 = w2 * RUMBLE_ZONE
+        pygame.draw.polygon(screen, rumble_color, (
+            (x1 - rw1, y1), (x1 + rw1, y1), (x2 + rw2, y2), (x2 - rw2, y2)))
+        pygame.draw.polygon(screen, road_color, (
+            (x1 - w1, y1), (x1 + w1, y1), (x2 + w2, y2), (x2 - w2, y2)))
+
+        if idx % 6 < 3:
+            lw1 = w1 * 0.03
+            lw2 = w2 * 0.03
+            pygame.draw.polygon(screen, LANE_COLOR, (
+                (x1 - lw1, y1), (x1 + lw1, y1), (x2 + lw2, y2), (x2 - lw2, y2)))
+
+        max_y = y1
+        i -= 1
+
+    return base_index, cam_x, cam_y, cam_z
+
+
+def draw_sprite(screen, world_x, world_y, world_z, cam_x, cam_y, cam_z, color, half_w):
+    if world_z <= cam_z:
+        return
+    x, y, w, scale = project(world_x, world_y, world_z, cam_x, cam_y, cam_z, half_w)
+    if scale <= 0.0:
+        return
+    h = w * 1.4
+    rect = pygame.Rect(int(x - w), int(y - h), int(w * 2), int(h))
+    if rect.bottom < 0 or rect.top > H:
+        return
+    pygame.draw.rect(screen, color, rect)
+
+
+def draw_car(screen, offset_frac):
+    cx = W / 2 + int(offset_frac * 40)
+    cy = H - 60
+    body = pygame.Rect(cx - 45, cy - 18, 90, 36)
+    pygame.draw.rect(screen, (210, 30, 30), body)
+    pygame.draw.rect(screen, (20, 20, 20), (cx - 50, cy + 10, 20, 12))
+    pygame.draw.rect(screen, (20, 20, 20), (cx + 30, cy + 10, 20, 12))
+
+
+def main():
+    if len(sys.argv) < 2:
+        sys.stderr.write('usage: python2.5 game.py <track.trk> [tilt_source] [telemetry_csv] [timeout_s]\n')
+        return 2
+    track_path = sys.argv[1]
+    tilt_path = sys.argv[2] if len(sys.argv) > 2 else ACCEL_PATH
+    timeout_s = float(sys.argv[4]) if len(sys.argv) > 4 else 120.0
+
+    trk = track.load(track_path)
+    errors = track.validate(trk)
+    if errors:
+        i = 0
+        while i < len(errors):
+            sys.stdout.write(errors[i] + '\n')
+            i += 1
+        return 2
+
+    telemetry_path = sys.argv[3] if len(sys.argv) > 3 else default_telemetry_path(track_path, trk)
+
+    pygame.init()
+    pygame.mouse.set_visible(False)
+    screen = pygame.display.set_mode((W, H), pygame.FULLSCREEN, 16)
+    bg = build_theme_background(trk.get('theme', DEFAULT_THEME))
+    tx = Telemetry(telemetry_path)
+
+    player_z = 0.0
+    player_x = 0.0
+    speed = 0.0
+
+    obstacle_hit_flags = [0] * len(trk['obstacles'])
+    traffic_cooldowns = [0.0] * len(trk['traffic'])
+
+    last_tilt = (0, 0, -1000)
+    t0 = time.time()
+    last_frame_t = t0
+    last_sample = t0
+    last_second = t0
+
+    sec_frames = 0
+    frames = 0
+    hits = 0
+    outcome = ''
+    pending_event = ''
+
+    calibration_sum = 0.0
+    calibration_count = 0
+    calibrated = 0
+    level_y = 0.0
+    tilt_history = []
+
+    vibrate_until = 0.0
+    vibrator_on = 0
+
+    try:
+        while not outcome:
+            frame_now = time.time()
+            race_t = frame_now - t0
+            if race_t >= timeout_s:
+                outcome = 'timeout'
+                break
+
+            vibrator_on = update_vibrator(frame_now, vibrate_until, vibrator_on)
+
+            for e in pygame.event.get():
+                if e.type == pygame.QUIT or e.type == pygame.KEYDOWN or e.type == pygame.MOUSEBUTTONDOWN:
+                    outcome = 'quit'
+                    break
+            if outcome:
+                break
+
+            dt = frame_now - last_frame_t
+            if dt < 0.0:
+                dt = 0.0
+            if dt > 0.05:
+                dt = 0.05
+            last_frame_t = frame_now
+
+            last_tilt = read_tilt(tilt_path, last_tilt)
+            raw_x, raw_y, raw_z = last_tilt
+
+            if not calibrated:
+                calibration_sum += raw_y
+                calibration_count += 1
+                if race_t >= CALIBRATION_WINDOW and calibration_count > 0:
+                    level_y = calibration_sum / calibration_count
+                    calibrated = 1
+                    tilt_history = []
+                steer_tilt = 0.0
+            else:
+                adj_y = raw_y - level_y
+                tilt_history.append(adj_y)
+                if len(tilt_history) > 3:
+                    del tilt_history[0]
+                s = 0.0
+                i = 0
+                while i < len(tilt_history):
+                    s += tilt_history[i]
+                    i += 1
+                steer_tilt = s / len(tilt_history)
+                if steer_tilt > -TILT_DEAD_ZONE and steer_tilt < TILT_DEAD_ZONE:
+                    steer_tilt = 0.0
+
+            i = 0
+            while i < len(traffic_cooldowns):
+                if traffic_cooldowns[i] > 0.0:
+                    traffic_cooldowns[i] -= dt
+                i += 1
+
+            if calibrated:
+                curve, _, width, _ = track.segment_at(trk, player_z)
+
+                # Zone is judged on this frame's *incoming* position, before the car
+                # moves, so a hard-braking penalty actually slows this frame's travel
+                # instead of only being visible a frame late in telemetry.
+                abs_x = abs(player_x)
+                off_road = abs_x > width * 1.0
+                in_grass = abs_x > width * GRASS_ZONE
+                in_rumble = (not in_grass) and abs_x > width * RUMBLE_ZONE
+
+                target_max = OFFROAD_MAX_SPEED if off_road else MAX_SPEED
+                if speed < target_max:
+                    speed += ACCEL * dt
+                    if speed > target_max:
+                        speed = target_max
+                else:
+                    speed -= BRAKE_DECEL * 0.5 * dt
+                    if speed < target_max:
+                        speed = target_max
+
+                wall_buzz_ms = 0
+                if in_grass:
+                    speed -= BRAKE_DECEL * dt
+                    wall_buzz_ms = 60
+                    if not pending_event:
+                        pending_event = 'grass'
+                elif in_rumble:
+                    wall_buzz_ms = 25
+                    if not pending_event:
+                        pending_event = 'curb'
+                if speed < 0.0:
+                    speed = 0.0
+
+                speed_frac = speed / MAX_SPEED
+                if speed_frac < STEER_MIN_SPEED_FRAC:
+                    speed_frac = STEER_MIN_SPEED_FRAC
+                player_x += steer_tilt * STEER_GAIN * speed_frac * dt
+                player_x -= curve * speed * CENTRIFUGAL * dt
+
+                # Hard bound so a missed corner is recoverable instead of an
+                # unbounded drift into open space.
+                max_drift = width * 3.0
+                if player_x > max_drift:
+                    player_x = max_drift
+                elif player_x < -max_drift:
+                    player_x = -max_drift
+
+                player_z += speed * dt
+
+                oi, okind = find_obstacle_hit(trk['obstacles'], player_z, player_x, trk, obstacle_hit_flags)
+                if oi >= 0:
+                    speed *= HIT_SPEED_SCALE
+                    hits += 1
+                    wall_buzz_ms = 180
+                    pending_event = 'hit-' + okind
+
+                ti, tkind = find_traffic_hit(trk['traffic'], player_z, player_x, race_t, trk, traffic_cooldowns)
+                if ti >= 0:
+                    speed *= HIT_SPEED_SCALE
+                    hits += 1
+                    wall_buzz_ms = 220
+                    pending_event = 'hit-' + tkind
+
+                if wall_buzz_ms > 0:
+                    vibrate_until, vibrator_on = buzz_vibrator(frame_now, wall_buzz_ms, vibrate_until, vibrator_on)
+
+            if player_z >= trk['lap_length']:
+                outcome = 'finish'
+                vibrate_until, vibrator_on = buzz_vibrator(frame_now, 150, vibrate_until, vibrator_on)
+
+            base_index, cam_x, cam_y, cam_z = draw_road(screen, bg, trk, player_z, player_x)
+
+            i = 0
+            while i < len(trk['obstacles']):
+                seg_i, offset, kind = trk['obstacles'][i]
+                obs_z = seg_i * SEGMENT_LENGTH + SEGMENT_LENGTH / 2.0
+                if obs_z >= player_z and obs_z < player_z + DRAW_DISTANCE * SEGMENT_LENGTH:
+                    _, oy, owidth, ocx = track.segment_at(trk, obs_z)
+                    obs_x = ocx + offset * owidth
+                    draw_sprite(screen, obs_x, oy, obs_z, cam_x, cam_y, cam_z,
+                                OBSTACLE_COLORS.get(kind, (150, 150, 150)), OBSTACLE_HALF_WIDTH)
+                i += 1
+
+            i = 0
+            while i < len(trk['traffic']):
+                seg_i, offset, tspeed, kind = trk['traffic'][i]
+                base_z = seg_i * SEGMENT_LENGTH
+                car_z = traffic_world_z(base_z, tspeed, race_t, trk['lap_length'])
+                if car_z >= player_z and car_z < player_z + DRAW_DISTANCE * SEGMENT_LENGTH:
+                    _, ty, twidth, tcx = track.segment_at(trk, car_z)
+                    car_x = tcx + offset * twidth
+                    draw_sprite(screen, car_x, ty, car_z, cam_x, cam_y, cam_z,
+                                TRAFFIC_COLORS.get(kind, (150, 150, 150)), OBSTACLE_HALF_WIDTH)
+                i += 1
+
+            draw_car(screen, player_x / (trk['width'] * 2.0))
+            pygame.display.flip()
+
+            frames += 1
+            sec_frames += 1
+
+            sample_now = time.time()
+            if sample_now - last_sample >= 0.1:
+                tx.sample(sample_now - t0, player_z, speed, player_x, raw_y, pending_event)
+                pending_event = ''
+                last_sample = sample_now
+            if sample_now - last_second >= 1.0:
+                tx.second(sample_now - t0, sec_frames / (sample_now - last_second))
+                sec_frames = 0
+                last_second = sample_now
+
+        elapsed = time.time() - t0
+        avg_fps = frames / elapsed if elapsed > 0.0 else 0.0
+        if not outcome:
+            outcome = 'timeout'
+
+        tx.close({'outcome': outcome, 'elapsed': elapsed, 'hits': hits, 'par': trk['par'],
+                  'frames': frames, 'avg_fps': avg_fps})
+        pygame.quit()
+        sys.stdout.write('RESULT outcome=%s elapsed=%.1f hits=%d par=%g frames=%d avg_fps=%.1f\n' % (
+            outcome, elapsed, hits, trk['par'], frames, avg_fps))
+        sys.stdout.flush()
+        if outcome == 'finish':
+            return 0
+        if outcome == 'quit':
+            return 1
+        if outcome == 'timeout':
+            return 3
+        return 1
+    finally:
+        write_vibrator('0')
+
+
+if __name__ == '__main__':
+    sys.exit(main())

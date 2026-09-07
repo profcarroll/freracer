@@ -1,0 +1,25 @@
+# Autumn Hills - first freracer track (hand-built; qwen3-coder generates the next ones)
+NAME Autumn Hills
+THEME autumn-hills
+SEED 7
+PAR 22
+WIDTH 1000
+
+ROAD 50 0 0
+ROAD 70 3 0
+ROAD 40 0 300
+ROAD 60 -4 0
+ROAD 30 0 -400
+ROAD 80 5 0
+ROAD 50 0 100
+ROAD 60 -3 -100
+ROAD 40 0 0
+
+OBSTACLE 55 -0.4 cone
+OBSTACLE 110 0.5 rock
+OBSTACLE 210 0.0 barrier
+OBSTACLE 330 -0.3 tree-stump
+
+TRAFFIC 30 -0.5 260 sedan
+TRAFFIC 150 0.5 220 truck
+TRAFFIC 300 -0.4 240 tractor
