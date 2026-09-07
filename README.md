@@ -38,14 +38,30 @@ and player make it worth playing? Racing adds two things marble-tilt didn't have
 forward dimension (speed, braking zones, racing lines) and other agents on the track
 (traffic to read and react to, not just static hazards).
 
+## Deploying to the N900
+
+```
+sh tools/deploy.sh                       # laptop -> /home/user/MyDocs/freracer
+N900_HOST=root@10.0.0.71 sh tools/deploy.sh   # if DHCP moved it
+```
+
+`deploy.sh` copies only what Python 2.5 on the device actually runs — the game, the
+tracks, and `tools/racer_fps.py`. The Python 3 tools (`generate_track.py`, which talks
+to `sld-cloud`, and `render_shot.py`/`fake_pygame.py`, the off-device renderer) stay on
+the laptop. It copies and stops; it never launches anything on the device.
+
+It passes the N900's legacy SSH crypto options to `scp` directly rather than going
+through the `n900` shim, which wraps `ssh` only — those options don't propagate through
+a `ProxyCommand`. The laptop's OpenSSL 3.5 refuses the device's `ssh-rsa`/KEX/cipher
+suite outright ("error in libcrypto") without them.
+
 ## Running it on the N900
 
 From the Hildon desktop, tap the freracer icon (see "Launching from the Maemo desktop"
 below). From a shell:
 
 ```
-scp -r . root@<n900-ip>:/home/user/MyDocs/freracer
-ssh root@<n900-ip>
+n900
 cd /home/user/MyDocs/freracer
 export DISPLAY=:0
 python2.5 test_track.py                              # PASS: tracks/001-autumn-hills.trk
@@ -66,11 +82,12 @@ The last line printed is always
 
 `desktop/` holds a real Hildon app-grid entry: `freracer.desktop`, a `/usr/bin/freracer`
 launcher script (cds into the install directory, runs untimed, logs to
-`freracer.log`), and a 64×64 icon. Install once, as root, after the repo is on the
-device at `/home/user/MyDocs/freracer`:
+`freracer.log`), and a 64×64 icon. This is a **one-time** step, separate from
+`deploy.sh`: it runs on the device, as root, after the repo is there, and only needs
+re-running if something in `desktop/` changes. It is already installed on the device.
 
 ```
-ssh root@<n900-ip> 'sh /home/user/MyDocs/freracer/desktop/install.sh'
+n900 'sh /home/user/MyDocs/freracer/desktop/install.sh'
 ```
 
 freracer then shows up under Games in the app grid like any other installed game — no
@@ -150,6 +167,7 @@ this tool (bytes to atoms — a human carries it over with `scp`).
 | `bot_steer.py` | scripted tilt writer, same convention as fremarble's `bot_tilt.py` |
 | `tools/racer_fps.py` | frame-rate probe for the road renderer, run on-device first |
 | `tools/render_shot.py`, `tools/fake_pygame.py` | render frames to PNG off-device, to check a rendering change before carrying it over |
+| `tools/deploy.sh` | copy the game, tracks and `racer_fps.py` to the device over `scp` |
 | `tools/generate_track.py` | prompts `qwen3-coder` on `sld-cloud` for new tracks, validates output |
 | `desktop/` | Hildon app-grid launcher: `.desktop` entry, `/usr/bin/freracer` script, icon, `install.sh` |
 | `.github/copilot-instructions.md` | the Python 2.5 bootstrap every model gets |
