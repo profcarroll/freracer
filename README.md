@@ -19,9 +19,10 @@ designed by a self-hosted language model. Sibling project to
 - **Course designer:** `qwen3-coder:30b-a3b-q4_K_M` on the same free Oracle Ampere A1
   node (`sld-cloud`) used by fremarble. `tools/generate_track.py` prompts it, then
   validates the result with the game's own loader before anything is written.
-- **Co-authoring model:** Claude Sonnet 5 (via GitHub Copilot) — architecture, `.trk`
+- **Co-authoring models:** Claude Sonnet 5 (via GitHub Copilot) — architecture, `.trk`
   format, `game.py`, on-device testing/tuning, and the `generate_track.py` bridge to
-  `qwen3-coder`. Per the course's
+  `qwen3-coder`. Claude Opus 5 (via Claude Code) — session 3's renderer rebuild. Per the
+  course's
   [ATTRIBUTION.md](https://github.com/mfadt/sld-fall-2026/blob/main/ATTRIBUTION.md),
   every commit trailer names it.
 - **Status:** prototype plays on the device. One hand-built track (Autumn Hills, a Gran
@@ -37,20 +38,41 @@ and player make it worth playing? Racing adds two things marble-tilt didn't have
 forward dimension (speed, braking zones, racing lines) and other agents on the track
 (traffic to read and react to, not just static hazards).
 
+## Deploying to the N900
+
+```
+sh tools/deploy.sh                       # laptop -> /home/user/MyDocs/freracer
+N900_HOST=root@10.0.0.71 sh tools/deploy.sh   # if DHCP moved it
+```
+
+`deploy.sh` copies only what Python 2.5 on the device actually runs — the game, the
+tracks, and `tools/racer_fps.py`. The Python 3 tools (`generate_track.py`, which talks
+to `sld-cloud`, and `render_shot.py`/`fake_pygame.py`, the off-device renderer) stay on
+the laptop. It copies and stops; it never launches anything on the device.
+
+It passes the N900's legacy SSH crypto options to `scp` directly rather than going
+through the `n900` shim, which wraps `ssh` only — those options don't propagate through
+a `ProxyCommand`. The laptop's OpenSSL 3.5 refuses the device's `ssh-rsa`/KEX/cipher
+suite outright ("error in libcrypto") without them.
+
 ## Running it on the N900
 
 From the Hildon desktop, tap the freracer icon (see "Launching from the Maemo desktop"
 below). From a shell:
 
 ```
-scp -r . root@<n900-ip>:/home/user/MyDocs/freracer
-ssh root@<n900-ip>
+n900
 cd /home/user/MyDocs/freracer
 export DISPLAY=:0
 python2.5 test_track.py                              # PASS: tracks/001-autumn-hills.trk
 python2.5 game.py tracks/001-autumn-hills.trk         # real accelerometer, no time limit
 python2.5 game.py                                    # same, but picks the lowest-numbered track in tracks/
 ```
+
+A race ends with a result panel — time, par, hits — which stays up for 12 seconds or
+until you tap. Before that existed, finishing returned straight out of `main()`, the
+launcher's shell exited with it, and the player landed back at the app grid with no
+explanation; the first playtest of the fixed renderer reported that as a crash.
 
 `game.py [track] [tilt_source] [telemetry_csv] [timeout_s]` — all arguments are optional.
 With no track given it plays the lowest-numbered `.trk` in `tracks/` (this is what the
@@ -65,11 +87,12 @@ The last line printed is always
 
 `desktop/` holds a real Hildon app-grid entry: `freracer.desktop`, a `/usr/bin/freracer`
 launcher script (cds into the install directory, runs untimed, logs to
-`freracer.log`), and a 64×64 icon. Install once, as root, after the repo is on the
-device at `/home/user/MyDocs/freracer`:
+`freracer.log`), and a 64×64 icon. This is a **one-time** step, separate from
+`deploy.sh`: it runs on the device, as root, after the repo is there, and only needs
+re-running if something in `desktop/` changes. It is already installed on the device.
 
 ```
-ssh root@<n900-ip> 'sh /home/user/MyDocs/freracer/desktop/install.sh'
+n900 'sh /home/user/MyDocs/freracer/desktop/install.sh'
 ```
 
 freracer then shows up under Games in the app grid like any other installed game — no
@@ -81,15 +104,59 @@ next step if freracer needs to be distributed beyond this repo.
 
 The scanline road renderer draws up to `DRAW_DISTANCE` road bands per frame — the one
 number most likely to need tuning for a 600 MHz CPU, the way fremarble's marble physics
-constants were tuned from `tools/marble_fps.py` numbers instead of guessed. Measured on
-the actual device with `tools/racer_fps.py`: `DRAW_DISTANCE=160` gave 36 avg / 19 worst
-fps (rough, uneven), `120` gave ~50 avg / ~49 worst fps (smooth). `track.py` and
-`game.py` now default to 120. Re-run this if the road, sprite count, or theme changes
-enough to matter:
+constants were tuned from `tools/marble_fps.py` numbers instead of guessed.
 
 ```
-python2.5 tools/racer_fps.py 15 120   # seconds, draw_distance
+python2.5 tools/racer_fps.py 15 120 3   # seconds, draw_distance, min_band_height
 ```
+
+**The renderer is bound by pygame draw calls per frame, not by pixels.** This is the
+single most useful thing to know before optimising it, and it is counter-intuitive
+enough that it was got wrong once already: splitting the ground fill and the rumble
+strip into left/right halves saved roughly 440k pixels a frame and cost 98 extra draw
+calls, and measured **22.0 → 18.5 fps**. Fewer, bigger primitives win. A draw call
+costs on the order of 90 µs here.
+
+So `MIN_BAND_HEIGHT`, not `DRAW_DISTANCE`, is the frame-rate dial — it controls how many
+bands earn their own calls without shortening the road. Measured on the device
+(`001-autumn-hills`, sustained motion):
+
+| | fps (avg / worst second) |
+|---|---|
+| `DRAW_DISTANCE=120`, `MIN_BAND_HEIGHT=1` | 22.0 / 20.7 |
+| `DRAW_DISTANCE=120`, `MIN_BAND_HEIGHT=2` | 24.5 / 23.9 |
+| **`DRAW_DISTANCE=120`, `MIN_BAND_HEIGHT=3`** (shipping) | **26.9 / 25.5** |
+| `DRAW_DISTANCE=120`, `MIN_BAND_HEIGHT=4` | 27.6 / 27.1 |
+| `DRAW_DISTANCE=100`, `MIN_BAND_HEIGHT=3` | 27.7 / 27.1 |
+| `DRAW_DISTANCE=80`, `MIN_BAND_HEIGHT=3` | 29.5 / 28.8 |
+
+`DRAW_DISTANCE` stays at 120 because it buys lookahead — 120 segments is two seconds of
+road at `MAX_SPEED`, which is what makes a corner readable — and dropping it to 100 is
+worth only 1.3 fps. The full game loop runs slower than the render probe: **~22 fps**
+bot-driven, the difference being physics, sprites and telemetry.
+
+Don't raise `MIN_BAND_HEIGHT` much past 3 without driving it. It quantises *which*
+segments get drawn, so the choice changes as the camera moves, and a coarse threshold
+can make the road stripes pop — which no still frame will show you.
+
+The old numbers (`160 → 36 fps`, `120 → ~50 fps`) are void: they were measured against a
+renderer that was discarding every road band but one, so they timed projection
+arithmetic with almost no rasterisation behind it.
+
+### Looking at a frame without the device
+
+The N900 is the only machine in the project with pygame on it, which is how a renderer
+that drew one band per frame survived two sessions of colour tuning. `render_shot.py`
+runs `game.py`'s draw path against a software rasteriser (`tools/fake_pygame.py`) and
+writes PNGs, so "does this frame look right" is answerable from the laptop:
+
+```
+python3 tools/render_shot.py tracks/001-autumn-hills.trk --frames 6 --out /tmp/shots
+python3 tools/render_shot.py tracks/002-night-circuit.trk --at 4000 --offset -400
+```
+
+It renders correctness, not speed — it says nothing about frame rate, and nothing about
+how the colours read on a resistive LCD outdoors. Both of those still need the device.
 
 ### Playing it with a bot
 
@@ -128,30 +195,48 @@ this tool (bytes to atoms — a human carries it over with `scp`).
 | `telemetry.py` | 10 Hz CSV writer (z, speed, lateral offset, tilt, event) |
 | `bot_steer.py` | scripted tilt writer, same convention as fremarble's `bot_tilt.py` |
 | `tools/racer_fps.py` | frame-rate probe for the road renderer, run on-device first |
+| `tools/render_shot.py`, `tools/fake_pygame.py` | render frames to PNG off-device, to check a rendering change before carrying it over |
+| `tools/deploy.sh` | copy the game, tracks and `racer_fps.py` to the device over `scp` |
 | `tools/generate_track.py` | prompts `qwen3-coder` on `sld-cloud` for new tracks, validates output |
 | `desktop/` | Hildon app-grid launcher: `.desktop` entry, `/usr/bin/freracer` script, icon, `install.sh` |
 | `.github/copilot-instructions.md` | the Python 2.5 bootstrap every model gets |
 
 ## Known behaviour / open questions
 
-- **First playtest (2026-09-07) found the game was not really playable**: steering used
-  fremarble's `raw_y` axis, which barely moves when the phone is held landscape for a
-  racer; the road was flat, low-contrast, and had no roadside detail, so it was hard to
-  tell where you were on it; and the vibrator sysfs path is root-only, so haptics never
-  actually fired when launched as `user` from the desktop. All three are now fixed (see
-  the corresponding commit and `game.py` comments): steering reads `raw_x`, measured live
-  on-device by rolling the phone and watching which axis actually moved; haptics go
-  through MCE's `req_vibrator_pattern_activate` D-Bus call instead of the sysfs file;
-  and `draw_road` now draws a banded, alternating-colour shoulder plus roadside marker
-  poles every 5 segments, on top of higher-contrast road paint. **Still needs a real
-  human playtest** to confirm it feels right - only bot-driven and render-only tests
-  have run so far.
-- **Physics constants are still starting points.** `DRAW_DISTANCE` (120) is tuned from
-  real `tools/racer_fps.py` numbers; with the new shoulder/pole rendering the full game
-  loop runs ~35-43 fps under sustained off-road bot steering (vs ~49 fps for bare-road
-  rendering in isolation) - stable, but re-run `racer_fps.py` and reconsider
-  `DRAW_DISTANCE` if more roadside detail is added. `MAX_SPEED`, `STEER_GAIN` and
-  `CENTRIFUGAL` are not yet tuned from a human play-test.
+- **The road was never being drawn at all** (found and fixed 2026-09-07, session 3).
+  Two independent bugs, either of which alone hides the road:
+  1. `draw_road` walked its segments far-to-near — the correct painter's order — while
+     keeping the near-to-far occlusion clip from the pseudo-3D renderer it was ported
+     from. That clip compares a band's far edge against the previous band's near edge,
+     but consecutive segments *share* that point: same segment dict, same z, so the same
+     float. `y2 >= max_y` was therefore true by equality on the second iteration and
+     every band nearer than the first was discarded. Exactly one band was drawn per
+     frame, 0.1px tall, at the horizon. Everything that looked like road surface was the
+     flat ground rectangle in the background surface — which is why two sessions of
+     tuning `ROAD_COLOR` changed nothing: that colour had never been on screen.
+  2. `track.py` integrates `curve` twice to bake an absolute centreline x into every
+     segment, so a long bend is constant angular *acceleration*: by segment 330 of
+     Autumn Hills the centreline is 22320 world units from the origin and pointing tens
+     of degrees off `+z`. `draw_road` set `cam_x = player_x` — an offset the physics
+     clamps to ±3 road widths — so on anything but the opening straight the camera was
+     aimed at empty space. The renderer now re-accumulates the centreline offset from
+     `curve` each frame starting at the camera, which is the standard treatment and
+     amounts to aiming the camera down the road's own tangent.
+
+  The same absolute-vs-relative confusion was in the collision tests, which added a
+  segment's absolute centreline x to an obstacle and compared it against a
+  centreline-relative `player_x`; both now compare in centreline-relative space.
+- **What the renderer draws now**: per-band full-width ground stripes (the periphery
+  motion cue — previously everything outside a narrow shoulder was one static colour),
+  red/white rumble strips, dashed lane markers, roadside marker posts every 5 segments,
+  and depth haze on all of it, pre-blended per distance at startup by `build_palette` so
+  the frame loop only indexes a list. Obstacle and traffic sprites take the same haze and
+  are drawn far-to-near.
+- **Physics constants are still starting points**, and none of the graphics work has been
+  seen on the device yet — it was verified by rendering frames through a software
+  rasteriser off-device. `MAX_SPEED`, `STEER_GAIN` and `CENTRIFUGAL` are not yet tuned
+  from a human play-test, and `DRAW_DISTANCE` needs a fresh `racer_fps.py` measurement
+  (see above).
 - **Traffic loops the lap on a timer, not a queue**: each `TRAFFIC` car's position is a
   pure function of race time and lap length, so it's always somewhere on the ribbon, but
   it does not react to the player or to other traffic.

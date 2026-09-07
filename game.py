@@ -33,6 +33,17 @@ MAX_SPEED = 6000.0        # world units / sec
 ACCEL = 2400.0            # units/sec^2 toward MAX_SPEED
 BRAKE_DECEL = 5200.0
 OFFROAD_MAX_SPEED = MAX_SPEED * 0.45
+# Grass is a speed cap you brake down *to*, not an unbounded brake. It used to
+# subtract BRAKE_DECEL every frame while ACCEL only added 2400, giving the
+# grass a terminal speed of exactly zero - so a single clipped corner stopped
+# the car dead, and recovering meant holding a tilt for ~7 s to crawl sideways
+# back onto the tarmac at the STEER_MIN_SPEED_FRAC floor before the throttle
+# did anything at all. On an arcade racer with no manual throttle that ends
+# the run. OFFROAD_MAX_SPEED already showed the intent was "slower, still
+# moving"; grass just never had its own floor. The value below is a starting
+# point picked to leave enough lateral authority to steer out in about a
+# second - it has not been tuned by driving.
+GRASS_MAX_SPEED = MAX_SPEED * 0.22
 CENTRIFUGAL = 0.0007      # curve pulls the car outward, proportional to speed
 CAR_HALF_WIDTH = 120.0
 OBSTACLE_HALF_WIDTH = 110.0
@@ -43,32 +54,37 @@ GRASS_ZONE = 1.35         # fraction of half-width beyond which is grass (hard p
 
 THEMES = {
     'autumn-hills': {
-        'sky': (255, 178, 102),
-        'sky2': (255, 214, 153),
-        'grass': (150, 95, 35),      # warm amber/fall foliage - was a muted
-        'grass2': (172, 115, 45),    # olive green too close to the road's grey
+        'sky': (250, 168, 96),
+        'sky2': (255, 216, 158),
+        'grass': (86, 104, 44),
+        'grass2': (112, 132, 60),
     },
     'dusk-city': {
-        'sky': (40, 30, 70),
-        'sky2': (90, 60, 110),
-        'grass': (55, 40, 80),       # dusky purple - was a near-neutral dark
-        'grass2': (68, 50, 95),      # grey, almost indistinguishable from the road
+        'sky': (24, 20, 52),
+        'sky2': (96, 64, 122),
+        'grass': (24, 22, 42),
+        'grass2': (44, 40, 74),
     },
     'coast': {
-        'sky': (140, 200, 235),
-        'sky2': (190, 225, 245),
-        'grass': (40, 165, 95),
-        'grass2': (55, 180, 110),
+        'sky': (120, 190, 235),
+        'sky2': (198, 228, 246),
+        'grass': (32, 138, 84),
+        'grass2': (52, 176, 110),
     },
 }
 DEFAULT_THEME = 'autumn-hills'
 
-# Road paint is a deliberately dark, neutral, low-saturation grey so it reads
-# as "road" against any of the (now much more saturated/hued) theme grounds
-# above - the first version's road/grass colours were close enough in both
-# hue and luminance that playtest feedback was "the road is not visible".
-ROAD_COLOR = (42, 42, 46)
-ROAD_COLOR2 = (60, 60, 66)
+# 'sky2' is doing two jobs: it is the bottom of the sky gradient *and* the
+# haze colour every distant thing fades into (see build_palette), so the road
+# dissolves into the horizon instead of stopping dead at DRAW_DISTANCE in
+# full-strength tarmac grey. Keep the two ends of each sky gradient close in
+# hue or the fade will read as a colour cast rather than as distance.
+
+# Road paint: dark neutral tarmac in a light/dark pair that alternates every
+# three segments. The alternation is the surface's only motion cue - on a real
+# road that cue is texture, which we cannot afford to draw per pixel.
+ROAD_COLOR = (42, 42, 48)
+ROAD_COLOR2 = (66, 66, 74)
 RUMBLE_LIGHT = (200, 60, 60)
 RUMBLE_DARK = (230, 230, 230)
 LANE_COLOR = (230, 220, 60)
@@ -78,6 +94,45 @@ POLE_INTERVAL = 5             # segments between roadside marker poles (500 worl
 POLE_OFFSET = 1.22            # fraction of half-width, just outside the rumble strip
 POLE_HALF_WIDTH = 28.0
 POLE_HEIGHT = 260.0
+
+# Depth shading. Blending eight band colours per band per frame in Python on a
+# 600 MHz CPU is not affordable, so build_palette() blends every colour at
+# every distance once, at startup, and the frame loop just indexes the result.
+FOG_STRENGTH = 0.72          # how far the furthest band goes toward the haze
+FOG_CURVE = 2.0               # >1 keeps near ground crisp and fades late
+
+# A band shorter than this is folded into the next one rather than drawn.
+# Near the horizon dozens of segments land on the same scanline and giving
+# each its own polygons buys nothing visible.
+#
+# This, not DRAW_DISTANCE, is the frame-rate dial. The renderer is bound by
+# pygame draw calls per frame, not by pixels: measured on the device at
+# DRAW_DISTANCE=120, min band height 1 -> 22.0 fps, 2 -> 24.5, 3 -> 26.5,
+# 4 -> 27.6. DRAW_DISTANCE is a much blunter instrument by comparison
+# (120 -> 26.4, 100 -> 27.7, 80 -> 29.5 at min band height 3) and it costs
+# lookahead, which is what makes a corner readable at speed - 120 segments is
+# two seconds of road at MAX_SPEED. Raising this instead costs only how
+# finely the distant road is sliced, which the depth haze hides anyway.
+#
+# Do not raise it much past 3 without driving it: this quantises *which*
+# segments get drawn, so as the camera moves the choice changes, and a coarse
+# threshold can make the road stripes pop. That does not show up in a still.
+MIN_BAND_HEIGHT = 3.0
+
+# Nothing closer than this is projected. The near edge of the band the camera
+# is standing in has dz ~ 0, and a point at dz -> 0 runs off along a fixed
+# screen ray, so clamping dz only slides that vertex further out along a ray
+# it is already on - the visible edges of the polygon are unchanged. What the
+# clamp buys is bounded coordinates: pygame 1.9.1 draws polygons through
+# 16-bit vertex maths, and an unclamped near vertex lands around x=100000.
+# 100 rather than the smallest value that avoids visible artifacts (~40):
+# the bound scales with the track's WIDTH and with how far off-centre the car
+# has drifted, and 100 keeps a 1500-wide track at full drift inside 16 bits.
+NEAR_PLANE = 100.0
+
+BACKDROP_H = 96               # rows of distance scenery sitting on the horizon
+BACKDROP_PAN = 2.5            # px of pan per world unit of centreline heading
+HORIZON_Y = H // 2            # where dz -> infinity projects, hills aside
 
 OBSTACLE_COLORS = {
     'rock': (110, 105, 100),
@@ -90,6 +145,145 @@ TRAFFIC_COLORS = {
     'truck': (200, 200, 60),
     'tractor': (60, 160, 60),
 }
+SPRITE_FALLBACK = (150, 150, 150)
+SPRITE_COLORS = {}
+SPRITE_COLORS.update(OBSTACLE_COLORS)
+SPRITE_COLORS.update(TRAFFIC_COLORS)
+
+
+class _Rng(object):
+    """Tiny deterministic LCG.
+
+    The backdrop is generated rather than shipped as art, and it has to come
+    out identical on the device and off it, so this does not use `random`
+    (whose stream is not guaranteed stable across Python versions, and the
+    device is on 2.5.4).
+    """
+
+    def __init__(self, seed):
+        self.s = seed
+
+    def pick(self, lo, hi):
+        self.s = (1103515245 * self.s + 12345) % 2147483648
+        return lo + self.s % (hi - lo)
+
+
+def _blend(color, target, t):
+    return (int(color[0] + (target[0] - color[0]) * t),
+            int(color[1] + (target[1] - color[1]) * t),
+            int(color[2] + (target[2] - color[2]) * t))
+
+
+def build_backdrop(theme_name):
+    """Distance scenery that pans sideways with the road\'s heading.
+
+    Everything else in the frame says "the road ahead is bent". This is the
+    only thing that says "you are turning", which is most of what a racer\'s
+    sense of motion is made of. It sits on the vanishing point because it is
+    notionally infinitely far away, so local hills do not move it - the road
+    bands simply paint over it when the ground rises above the horizon.
+
+    The tile is twice screen width and is blitted twice, wrapping. The sky
+    gradient for these rows is baked into it so the blit can be opaque: a
+    colour-keyed blit of 800x96 every frame is real work on this CPU, and an
+    opaque one is a memcpy per row.
+    """
+    theme = THEMES.get(theme_name, THEMES[DEFAULT_THEME])
+    sky = theme['sky']
+    sky2 = theme['sky2']
+    w = W * 2
+    surf = pygame.Surface((w, BACKDROP_H)).convert()
+
+    fade = int(H * 0.55)
+    top = HORIZON_Y - BACKDROP_H
+    y = 0
+    while y < BACKDROP_H:
+        sy = top + y
+        if sy >= fade:
+            c = sky2
+        else:
+            t = sy / float(fade)
+            c = (int(sky[0] + (sky2[0] - sky[0]) * t),
+                 int(sky[1] + (sky2[1] - sky[1]) * t),
+                 int(sky[2] + (sky2[2] - sky[2]) * t))
+        pygame.draw.line(surf, c, (0, y), (w, y))
+        y += 1
+
+    rng = _Rng(len(theme_name) * 7919 + 17)
+    if theme_name == 'dusk-city':
+        rank = 1
+        while rank >= 0:
+            haze = 0.30 + rank * 0.34
+            col = _blend((16, 14, 30), sky2, haze)
+            lit = _blend((255, 214, 120), sky2, haze * 0.8)
+            x = -rng.pick(0, 40)
+            while x < w:
+                tw = rng.pick(16, 54)
+                th = rng.pick(18, BACKDROP_H - 8 - rank * 20)
+                surf.fill(col, (x, BACKDROP_H - th, tw, th))
+                if rank == 0 and tw > 22:
+                    k = 0
+                    while k < th // 14:
+                        surf.fill(lit, (x + rng.pick(4, tw - 6),
+                                        BACKDROP_H - th + 6 + k * 14, 3, 4))
+                        k += 1
+                x += tw + rng.pick(3, 14)
+            rank -= 1
+    else:
+        # Two ridge lines from harmonics of the tile width, so the seam where
+        # the tile wraps is continuous.
+        two_pi = math.pi * 2.0
+        rank = 1
+        while rank >= 0:
+            haze = 0.34 + rank * 0.30
+            col = _blend(theme['grass'], sky2, haze)
+            base = 0.62 - rank * 0.16
+            amp = 0.30 - rank * 0.10
+            pts = [(0, BACKDROP_H)]
+            j = 0
+            while j <= w:
+                u = j / float(w)
+                hgt = (0.45 * math.sin(two_pi * (3 + rank * 2) * u) +
+                       0.32 * math.sin(two_pi * (7 + rank) * u + 1.1 + rank) +
+                       0.23 * math.sin(two_pi * 13 * u + 2.3))
+                pts.append((j, int(BACKDROP_H * (base - amp * hgt))))
+                j += 8
+            pts.append((w, BACKDROP_H))
+            pygame.draw.polygon(surf, col, pts)
+            rank -= 1
+    return surf
+
+
+def build_palette(theme_name):
+    """Pre-blend every colour the road renderer uses, at every distance.
+
+    Returns (bands, poles, sprites), each indexed by how many segments ahead
+    of the camera a thing is:
+      bands[i][parity] -> (ground, rumble, road, lane)
+      poles[i][parity] -> marker post colour
+      sprites[i][kind] -> obstacle/traffic colour ('' is the fallback)
+    """
+    theme = THEMES.get(theme_name, THEMES[DEFAULT_THEME])
+    haze = theme['sky2']
+    bands = []
+    poles = []
+    sprites = []
+    i = 0
+    while i < DRAW_DISTANCE:
+        f = FOG_STRENGTH * (i / float(DRAW_DISTANCE)) ** FOG_CURVE
+        bands.append((
+            (_blend(theme['grass'], haze, f), _blend(RUMBLE_LIGHT, haze, f),
+             _blend(ROAD_COLOR, haze, f), _blend(LANE_COLOR, haze, f)),
+            (_blend(theme['grass2'], haze, f), _blend(RUMBLE_DARK, haze, f),
+             _blend(ROAD_COLOR2, haze, f), _blend(LANE_COLOR, haze, f)),
+        ))
+        poles.append((_blend(POLE_LIGHT, haze, f), _blend(POLE_DARK, haze, f)))
+        sp = {'': _blend(SPRITE_FALLBACK, haze, f)}
+        for kind in SPRITE_COLORS:
+            sp[kind] = _blend(SPRITE_COLORS[kind], haze, f)
+        sprites.append(sp)
+        i += 1
+    return bands, poles, sprites
 
 
 def sanitize_name(name):
@@ -189,30 +383,48 @@ def stop_buzz_helper(helper):
 
 
 
-def project(world_x, world_y, world_z, cam_x, cam_y, cam_z, road_width):
+def project(lateral, world_y, world_z, cam_y, cam_z, road_width):
+    """Project a point given as a *lateral offset from the camera's line*.
+
+    Nothing in the renderer works in absolute world x any more; see
+    draw_road's road_x accumulator for why.
+    """
     dz = world_z - cam_z
-    if dz < 1.0:
-        dz = 1.0
+    if dz < NEAR_PLANE:
+        dz = NEAR_PLANE
     scale = CAMERA_DEPTH / dz
-    screen_x = (W / 2.0) + scale * (world_x - cam_x) * (W / 2.0)
+    screen_x = (W / 2.0) + scale * lateral * (W / 2.0)
     screen_y = (H / 2.0) - scale * (world_y - cam_y) * (H / 2.0)
     screen_w = scale * road_width * (W / 2.0)
     return screen_x, screen_y, screen_w, scale
 
 
 def build_theme_background(theme_name):
+    """Sky gradient over the whole surface - no ground slab.
+
+    The ground used to be a flat rectangle filling the bottom half here, and
+    because draw_road was discarding every road band (see its docstring),
+    that rectangle was almost the entire picture: what looked like a badly
+    coloured road surface was this. The ground is now drawn per band by
+    draw_road, one full-width stripe at a time, so it scrolls. What is left
+    for this surface to provide is sky, and distance haze wherever the road
+    has not reached - which is why the gradient runs out to sky2 and then
+    holds it, rather than stopping at a horizon line.
+    """
     theme = THEMES.get(theme_name, THEMES[DEFAULT_THEME])
+    sky = theme['sky']
+    sky2 = theme['sky2']
     bg = pygame.Surface((W, H)).convert()
-    horizon = H / 2
+    bg.fill(sky2)
+    fade = int(H * 0.55)
     i = 0
-    while i < horizon:
-        t = i / float(horizon)
-        r = int(theme['sky'][0] + (theme['sky2'][0] - theme['sky'][0]) * t)
-        g = int(theme['sky'][1] + (theme['sky2'][1] - theme['sky'][1]) * t)
-        b = int(theme['sky'][2] + (theme['sky2'][2] - theme['sky'][2]) * t)
+    while i < fade:
+        t = i / float(fade)
+        r = int(sky[0] + (sky2[0] - sky[0]) * t)
+        g = int(sky[1] + (sky2[1] - sky[1]) * t)
+        b = int(sky[2] + (sky2[2] - sky[2]) * t)
         pygame.draw.line(bg, (r, g, b), (0, i), (W, i))
         i += 1
-    pygame.draw.rect(bg, theme['grass'], (0, horizon, W, H - horizon))
     return bg
 
 
@@ -230,8 +442,14 @@ def find_obstacle_hit(obstacles, player_z, player_x, trk, hit_flags):
         if not hit_flags[i]:
             obs_z = seg_i * SEGMENT_LENGTH + SEGMENT_LENGTH / 2.0
             if abs(player_z - obs_z) < SEGMENT_LENGTH:
-                _, _, width, cx = track.segment_at(trk, obs_z)
-                obs_x = cx + offset * width
+                # Compared in centreline-relative space, the same space
+                # player_x and the off-road test live in. The old version
+                # added the segment's absolute centreline x to the obstacle
+                # and compared that against a relative player_x, so once the
+                # centreline drifted from the origin nothing could ever be
+                # hit.
+                _, _, width, _ = track.segment_at(trk, obs_z)
+                obs_x = offset * width
                 if abs(player_x - obs_x) < (CAR_HALF_WIDTH + OBSTACLE_HALF_WIDTH):
                     hit_flags[i] = 1
                     return i, kind
@@ -246,8 +464,9 @@ def find_traffic_hit(traffic, player_z, player_x, t, trk, cooldowns):
         base_z = seg_i * SEGMENT_LENGTH
         car_z = traffic_world_z(base_z, speed, t, trk['lap_length'])
         if cooldowns[i] <= 0.0 and abs(player_z - car_z) < SEGMENT_LENGTH * 0.8:
-            _, _, width, cx = track.segment_at(trk, car_z)
-            car_x = cx + offset * width
+            # Centreline-relative, as in find_obstacle_hit above.
+            _, _, width, _ = track.segment_at(trk, car_z)
+            car_x = offset * width
             if abs(player_x - car_x) < (CAR_HALF_WIDTH + OBSTACLE_HALF_WIDTH):
                 cooldowns[i] = 2.0
                 return i, kind
@@ -255,11 +474,28 @@ def find_traffic_hit(traffic, player_z, player_x, t, trk, cooldowns):
     return -1, None
 
 
-def draw_road(screen, bg, trk, player_z, player_x):
-    screen.blit(bg, (0, 0))
+def draw_road(screen, bg, backdrop, trk, palette, player_z, player_x):
+    """Scanline road, walked near-to-far with a painter\'s clip.
+
+    The walk direction is the whole trick, and getting it backwards is what
+    made this renderer draw nothing. Near-to-far, each band is drawn from
+    where the previous band stopped (ny) up to its own far edge (fy), so
+    bands tile the screen without overlapping, and a band hidden behind a
+    crest simply never clears the test. The previous version walked
+    far-to-near while keeping this near-to-far clip, comparing a band\'s far
+    edge against the previous band\'s near edge - but those are the same
+    point, projected from the same segment at the same z, so the comparison
+    was true by float equality and every band nearer than the first was
+    thrown away. Exactly one 0.1px-tall band was drawn per frame.
+
+    Walking in order pays for itself twice: adjacent segments share an
+    endpoint, so each band reuses the previous band\'s far projection as its
+    own near projection. One projection per segment instead of two.
+    """
+    band_pal = palette[0]
+    pole_pal = palette[1]
     segments = trk['segments']
     n = len(segments)
-    theme = THEMES.get(trk.get('theme', DEFAULT_THEME), THEMES[DEFAULT_THEME])
 
     base_index = int(player_z / SEGMENT_LENGTH)
     if base_index >= n - 1:
@@ -267,103 +503,190 @@ def draw_road(screen, bg, trk, player_z, player_x):
     if base_index < 0:
         base_index = 0
 
+    # player_x is an offset from the centreline, not a world coordinate - the
+    # physics, the off-road test and draw_car all read it that way. The
+    # centreline itself wanders a long way from the origin (track.py
+    # integrates it from curve, so 001-autumn-hills reaches x=22320 by its
+    # last segment), so the camera has to be placed relative to it. Setting
+    # cam_x = player_x, as this did, pointed the camera at world x=+-3000 on
+    # a track whose road was kilometres away: past the first straight, the
+    # road was simply not in frame. Placing the camera on the centreline is
+    # also what makes a bend read as a bend - the road ahead diverges from
+    # the camera's fixed heading and sweeps across the screen.
     _, player_y, _, _ = track.segment_at(trk, player_z)
-    cam_x = player_x
     cam_y = player_y + CAMERA_HEIGHT
     cam_z = player_z
 
-    max_y = H
-    i = DRAW_DISTANCE - 1
-    while i >= 0:
+    # project() is inlined below: it would run DRAW_DISTANCE times a frame and
+    # the call overhead alone is measurable on a 600 MHz CPU.
+    half_w = W / 2.0
+    half_h = H / 2.0
+
+    # Lateral offset of the centreline ahead of the camera, re-accumulated
+    # from curve every frame starting at zero. track.py bakes an absolute
+    # centreline x into each segment by integrating curve twice from the start
+    # line; that is fine as data but cannot be projected against, because both
+    # the offset and the *heading* it implies grow without bound - by segment
+    # 330 of 001-autumn-hills the centreline is 22320 units from the origin
+    # and pointing tens of degrees off +z. A camera looking down +z sees no
+    # road. Restarting the accumulator at the camera is the standard
+    # pseudo-3D treatment and amounts to aiming the camera down the road's
+    # own tangent, so a bend sweeps across the screen instead of off it.
+    road_x = 0.0
+    road_dx = 0.0
+    curve_off = []
+
+    a = segments[base_index]
+    dz = base_index * SEGMENT_LENGTH - cam_z
+    if dz < NEAR_PLANE:
+        dz = NEAR_PLANE
+    s = CAMERA_DEPTH / dz
+    nx = half_w + s * (-player_x) * half_w
+    ny = half_h - s * (a['y'] - cam_y) * half_h
+    nw = s * a['width'] * half_w
+
+    poles = []
+    i = 0
+    while i < DRAW_DISTANCE:
         idx = base_index + i
         if idx >= n - 1:
-            i -= 1
-            continue
-        a = segments[idx]
+            break
         b = segments[idx + 1]
-        z1 = idx * SEGMENT_LENGTH
-        z2 = (idx + 1) * SEGMENT_LENGTH
-        if z2 <= cam_z:
-            i -= 1
-            continue
+        road_dx += segments[idx]['curve']
+        road_x += road_dx
+        curve_off.append(road_x)
+        dz = (idx + 1) * SEGMENT_LENGTH - cam_z
+        if dz < NEAR_PLANE:
+            dz = NEAR_PLANE
+        s = CAMERA_DEPTH / dz
+        fx = half_w + s * (road_x - player_x) * half_w
+        fy = half_h - s * (b['y'] - cam_y) * half_h
+        fw = s * b['width'] * half_w
 
-        x1, y1, w1, s1 = project(a['x'], a['y'], z1, cam_x, cam_y, cam_z, a['width'])
-        x2, y2, w2, s2 = project(b['x'], b['y'], z2, cam_x, cam_y, cam_z, b['width'])
-
-        if y2 >= y1 or y2 >= max_y:
-            i -= 1
-            continue
-
-        band = (idx // 3) % 2
-        road_color = ROAD_COLOR if band == 0 else ROAD_COLOR2
-        rumble_color = RUMBLE_LIGHT if band == 0 else RUMBLE_DARK
-        shoulder_color = theme['grass'] if band == 0 else theme['grass2']
-
-        # Shoulder: a banded strip wider than the rumble strip, so the ground
-        # right next to the road visibly scrolls past too - without this the
-        # whole periphery was one flat static colour and nothing but the road
-        # itself read as "moving", which is why the road edge was hard to place.
-        sw1 = w1 * (RUMBLE_ZONE + 1.2)
-        sw2 = w2 * (RUMBLE_ZONE + 1.2)
-        pygame.draw.polygon(screen, shoulder_color, (
-            (x1 - sw1, y1), (x1 + sw1, y1), (x2 + sw2, y2), (x2 - sw2, y2)))
-
-        rw1 = w1 * RUMBLE_ZONE
-        rw2 = w2 * RUMBLE_ZONE
-        pygame.draw.polygon(screen, rumble_color, (
-            (x1 - rw1, y1), (x1 + rw1, y1), (x2 + rw2, y2), (x2 - rw2, y2)))
-        pygame.draw.polygon(screen, road_color, (
-            (x1 - w1, y1), (x1 + w1, y1), (x2 + w2, y2), (x2 - w2, y2)))
-
-        if idx % 6 < 3:
-            lw1 = w1 * 0.03
-            lw2 = w2 * 0.03
-            pygame.draw.polygon(screen, LANE_COLOR, (
-                (x1 - lw1, y1), (x1 + lw1, y1), (x2 + lw2, y2), (x2 - lw2, y2)))
-
+        # Marker posts are emitted before the band test, not inside it.
+        # Whether a segment earns its own road band is a rasterisation
+        # question - MIN_BAND_HEIGHT, tuned for frame rate - and tying the
+        # roadside furniture to it meant raising that threshold silently
+        # thinned the posts out with distance, losing the strongest cue for
+        # how fast the road is going past.
         if idx % POLE_INTERVAL == 0:
-            pole_color = POLE_LIGHT if (idx // POLE_INTERVAL) % 2 == 0 else POLE_DARK
-            pw1 = w1 * POLE_OFFSET
-            draw_pole(screen, a['x'] - pw1, a['y'], z1, cam_x, cam_y, cam_z,
-                      pole_color, POLE_HALF_WIDTH, POLE_HEIGHT)
-            draw_pole(screen, a['x'] + pw1, a['y'], z1, cam_x, cam_y, cam_z,
-                      pole_color, POLE_HALF_WIDTH, POLE_HEIGHT)
+            # Derived from the projection already in hand rather than
+            # re-projecting the post's base and top: same scale factor, so
+            # the post's screen height is just its world height times s.
+            ph = s * POLE_HEIGHT * half_h
+            if ph >= 2.0:
+                pb = fw * (POLE_HALF_WIDTH / b['width'])
+                if pb < 1.0:
+                    pb = 1.0
+                pc = pole_pal[i][(idx // POLE_INTERVAL) % 2]
+                po = fw * POLE_OFFSET
+                ptop = int(fy - ph)
+                pwide = int(pb * 2.0)
+                phigh = int(ph)
+                poles.append((pc, int(fx - po - pb), ptop, pwide, phigh))
+                poles.append((pc, int(fx + po - pb), ptop, pwide, phigh))
 
-        max_y = y1
-        i -= 1
+        # Behind a crest, or too short to earn its own polygons. Either way
+        # leave the near edge where it is, so this segment is folded into
+        # whichever band next clears the test and no gap opens up.
+        if fy >= ny - MIN_BAND_HEIGHT:
+            i += 1
+            continue
 
-    return base_index, cam_x, cam_y, cam_z
+        pal = band_pal[i][(idx // 3) % 2]
+
+        # One full-width ground stripe per band. This is the periphery motion
+        # cue: everything outside a narrow shoulder used to be a single static
+        # colour, so nothing but the road itself could read as moving.
+        #
+        # The height is deliberately int(ny) - top, with no +1. Bands are
+        # drawn near to far and band k's near edge is bit-identical to band
+        # k-1's far edge, so a +1 made every band repaint the top row of the
+        # band in front of it - a row the nearer band had already, correctly,
+        # filled with road. The result was a full-width grass line punched
+        # through the road at every band boundary, which in the middle
+        # distance shredded the surface into alternating road and grass. It
+        # read as "the road is the wrong colour". Without the +1 the stripes
+        # tile exactly: [int(fy), int(ny)-1] then [int(ny), ...].
+        #
+        # One wide fill, not two narrow ones flanking the road. Filling the
+        # pixels the road is about to cover is pure waste, but this device
+        # charges by the draw call, not by the pixel: splitting this fill and
+        # the rumble below into left/right halves saved ~440k pixels a frame
+        # and cost 98 extra calls, and measured 22.0 -> 18.5 fps at
+        # DRAW_DISTANCE=120. Fewer, bigger primitives win here.
+        top = int(fy)
+        height = int(ny) - top
+        if height > 0:
+            screen.fill(pal[0], (0, top, W, height))
+
+        rn = nw * RUMBLE_ZONE
+        rf = fw * RUMBLE_ZONE
+        pygame.draw.polygon(screen, pal[1], (
+            (nx - rn, ny), (nx + rn, ny), (fx + rf, fy), (fx - rf, fy)))
+        pygame.draw.polygon(screen, pal[2], (
+            (nx - nw, ny), (nx + nw, ny), (fx + fw, fy), (fx - fw, fy)))
+
+        if idx % 6 < 3 and nw > 10.0:
+            ln = nw * 0.035
+            lf = fw * 0.035
+            pygame.draw.polygon(screen, pal[3], (
+                (nx - ln, ny), (nx + ln, ny), (fx + lf, fy), (fx - lf, fy)))
+
+        nx = fx
+        ny = fy
+        nw = fw
+        i += 1
+
+    # Sky and scenery go in last, clipped to the rows the road did not reach.
+    # The bands tile from the topmost far edge down to the bottom of the
+    # screen and each one paints its own rows opaquely, so a full-screen
+    # background blit before the walk was drawing ~190k pixels a frame that
+    # were then painted over - about a fifth of the frame\'s whole fill budget
+    # on a device with no blitter. Measured 22 fps at DRAW_DISTANCE=120 before
+    # this; the road is fill-rate bound, not band-count bound (dropping the
+    # draw distance from 120 to 50 was worth only 6 fps, because the bands
+    # cover the same screen area either way).
+    top_y = int(ny)
+    if top_y > 0:
+        if top_y > H:
+            top_y = H
+        screen.set_clip((0, 0, W, top_y))
+        screen.blit(bg, (0, 0))
+        # The camera looks down the centreline\'s tangent (see road_x above),
+        # so the scenery pans by that tangent\'s heading. track.py\'s baked
+        # centreline x is useless to project against, but its first difference
+        # *is* that heading - the one thing it is good for.
+        bw = backdrop.get_width()
+        pan = int(-(segments[base_index + 1]['x'] - segments[base_index]['x'])
+                  * BACKDROP_PAN) % bw
+        btop = HORIZON_Y - BACKDROP_H
+        screen.blit(backdrop, (pan - bw, btop))
+        screen.blit(backdrop, (pan, btop))
+        screen.set_clip(None)
+
+    # Posts go in a second pass, far to near. A post stands *above* its own
+    # band\'s far edge, which is territory the next band\'s ground stripe
+    # paints over, so drawing them inline during a near-to-far walk would
+    # bury every post except the last one. They come after the sky so a near
+    # post may stand above the horizon.
+    j = len(poles) - 1
+    while j >= 0:
+        p = poles[j]
+        screen.fill(p[0], (p[1], p[2], p[3], p[4]))
+        j -= 1
+
+    return base_index, cam_y, cam_z, curve_off
 
 
-def draw_sprite(screen, world_x, world_y, world_z, cam_x, cam_y, cam_z, color, half_w):
+def draw_sprite(screen, lateral, world_y, world_z, cam_y, cam_z, color, half_w):
     if world_z <= cam_z:
         return
-    x, y, w, scale = project(world_x, world_y, world_z, cam_x, cam_y, cam_z, half_w)
+    x, y, w, scale = project(lateral, world_y, world_z, cam_y, cam_z, half_w)
     if scale <= 0.0:
         return
     h = w * 1.4
     rect = pygame.Rect(int(x - w), int(y - h), int(w * 2), int(h))
-    if rect.bottom < 0 or rect.top > H:
-        return
-    pygame.draw.rect(screen, color, rect)
-
-
-def draw_pole(screen, world_x, ground_y, world_z, cam_x, cam_y, cam_z, color, half_w, height):
-    # Roadside marker post: projects the ground point and a point `height`
-    # above it separately (unlike draw_sprite, whose height is tied to its
-    # projected half-width) so poles read as a consistent physical size
-    # planted on the shoulder, not a blob scaled only by lane width.
-    if world_z <= cam_z:
-        return
-    bx, by, bw, bscale = project(world_x, ground_y, world_z, cam_x, cam_y, cam_z, half_w)
-    if bscale <= 0.0:
-        return
-    _, ty, _, _ = project(world_x, ground_y + height, world_z, cam_x, cam_y, cam_z, half_w)
-    top = int(ty)
-    bottom = int(by)
-    if bottom <= top:
-        return
-    rect = pygame.Rect(int(bx - bw), top, int(bw * 2), bottom - top)
     if rect.bottom < 0 or rect.top > H:
         return
     pygame.draw.rect(screen, color, rect)
@@ -376,6 +699,73 @@ def draw_car(screen, offset_frac):
     pygame.draw.rect(screen, (210, 30, 30), body)
     pygame.draw.rect(screen, (20, 20, 20), (cx - 50, cy + 10, 20, 12))
     pygame.draw.rect(screen, (20, 20, 20), (cx + 30, cy + 10, 20, 12))
+
+
+RESULT_HOLD = 12.0            # seconds the result panel stays up if untouched
+
+
+def draw_result(screen, outcome, elapsed, hits, par):
+    """Post-race panel. Returns 1 if it drew something.
+
+    Reaching the finish line used to return straight out of main(): the
+    process ended, the Hildon launcher's shell exited with it, and the player
+    was dropped back at the app grid with no explanation. That is
+    indistinguishable from a crash, and it was reported as one - twice, in a
+    playtest where both runs had in fact been completed cleanly, under par,
+    with no collisions. The lap is 48000 units and MAX_SPEED is 6000/s, so a
+    good run is over in ten seconds; whatever else changes about the course,
+    the end of a race has to say that it ended.
+    """
+    if outcome == 'finish':
+        title = 'FINISHED'
+        accent = (250, 220, 90) if elapsed <= par else (235, 235, 235)
+    elif outcome == 'timeout':
+        title = 'TIME UP'
+        accent = (235, 235, 235)
+    else:
+        return 0                      # 'quit' - the player asked to leave
+
+    big = pygame.font.Font(None, 76)
+    small = pygame.font.Font(None, 34)
+    pw = 520
+    ph = 258
+    px = (W - pw) // 2
+    py = (H - ph) // 2
+    pygame.draw.rect(screen, (10, 10, 14), (px, py, pw, ph))
+    pygame.draw.rect(screen, accent, (px, py, pw, ph), 3)
+
+    verdict = 'under par' if elapsed <= par else 'over par'
+    lines = ((big, title, accent),
+             (small, '%.1f s' % elapsed, (238, 238, 238)),
+             (small, 'par %.0f s - %s' % (par, verdict), (168, 168, 176)),
+             (small, 'hits %d' % hits, (168, 168, 176)),
+             (small, 'tap the screen to exit', (112, 112, 122)))
+    y = py + 24
+    i = 0
+    while i < len(lines):
+        font, text, colour = lines[i]
+        surf = font.render(text, 1, colour)
+        screen.blit(surf, (px + (pw - surf.get_width()) // 2, y))
+        y += surf.get_height() + 8
+        i += 1
+    return 1
+
+
+def hold_result(screen):
+    # The race loop treats any tap as "end the race", so the queue may hold
+    # the very tap that crossed the line. Drop it, or the panel flashes past.
+    pygame.event.clear()
+    pygame.display.flip()
+    hold_until = time.time() + RESULT_HOLD
+    while time.time() < hold_until:
+        events = pygame.event.get()
+        i = 0
+        while i < len(events):
+            e = events[i]
+            if e.type == pygame.QUIT or e.type == pygame.KEYDOWN or e.type == pygame.MOUSEBUTTONDOWN:
+                return
+            i += 1
+        pygame.time.wait(50)
 
 
 def default_track_path():
@@ -423,6 +813,9 @@ def main():
     pygame.mouse.set_visible(False)
     screen = pygame.display.set_mode((W, H), pygame.FULLSCREEN, 16)
     bg = build_theme_background(trk.get('theme', DEFAULT_THEME))
+    backdrop = build_backdrop(trk.get('theme', DEFAULT_THEME))
+    palette = build_palette(trk.get('theme', DEFAULT_THEME))
+    sprite_pal = palette[2]
     tx = Telemetry(telemetry_path)
 
     player_z = 0.0
@@ -527,19 +920,31 @@ def main():
                 in_grass = abs_x > width * GRASS_ZONE
                 in_rumble = (not in_grass) and abs_x > width * RUMBLE_ZONE
 
-                target_max = OFFROAD_MAX_SPEED if off_road else MAX_SPEED
+                # One target speed per surface, approached from either side:
+                # below it the throttle pulls up to it, above it the surface
+                # brakes down to it, and it is never crossed. That last part
+                # is what stops grass being a dead end.
+                if in_grass:
+                    target_max = GRASS_MAX_SPEED
+                    decel = BRAKE_DECEL
+                elif off_road:
+                    target_max = OFFROAD_MAX_SPEED
+                    decel = BRAKE_DECEL * 0.5
+                else:
+                    target_max = MAX_SPEED
+                    decel = BRAKE_DECEL * 0.5
+
                 if speed < target_max:
                     speed += ACCEL * dt
                     if speed > target_max:
                         speed = target_max
                 else:
-                    speed -= BRAKE_DECEL * 0.5 * dt
+                    speed -= decel * dt
                     if speed < target_max:
                         speed = target_max
 
                 buzz_key = None
                 if in_grass:
-                    speed -= BRAKE_DECEL * dt
                     if not pending_event:
                         pending_event = 'grass'
                     if frame_now >= next_zone_buzz:
@@ -593,17 +998,23 @@ def main():
                 outcome = 'finish'
                 buzz_event(buzz_helper, 'finish')
 
-            base_index, cam_x, cam_y, cam_z = draw_road(screen, bg, trk, player_z, player_x)
+            base_index, cam_y, cam_z, curve_off = draw_road(
+                screen, bg, backdrop, trk, palette, player_z, player_x)
+            n_curve = len(curve_off)
 
+            # Sprites are collected first and drawn far-to-near afterwards.
+            # Drawing them in track order let a distant car paint over a near
+            # one; they also take the same distance haze as the road, or a
+            # full-saturation cone at the horizon reads as nearer than the
+            # road it is standing on.
+            sprites = []
             i = 0
             while i < len(trk['obstacles']):
                 seg_i, offset, kind = trk['obstacles'][i]
                 obs_z = seg_i * SEGMENT_LENGTH + SEGMENT_LENGTH / 2.0
                 if obs_z >= player_z and obs_z < player_z + DRAW_DISTANCE * SEGMENT_LENGTH:
-                    _, oy, owidth, ocx = track.segment_at(trk, obs_z)
-                    obs_x = ocx + offset * owidth
-                    draw_sprite(screen, obs_x, oy, obs_z, cam_x, cam_y, cam_z,
-                                OBSTACLE_COLORS.get(kind, (150, 150, 150)), OBSTACLE_HALF_WIDTH)
+                    _, oy, owidth, _ = track.segment_at(trk, obs_z)
+                    sprites.append((obs_z, offset * owidth, oy, kind))
                 i += 1
 
             i = 0
@@ -612,11 +1023,32 @@ def main():
                 base_z = seg_i * SEGMENT_LENGTH
                 car_z = traffic_world_z(base_z, tspeed, race_t, trk['lap_length'])
                 if car_z >= player_z and car_z < player_z + DRAW_DISTANCE * SEGMENT_LENGTH:
-                    _, ty, twidth, tcx = track.segment_at(trk, car_z)
-                    car_x = tcx + offset * twidth
-                    draw_sprite(screen, car_x, ty, car_z, cam_x, cam_y, cam_z,
-                                TRAFFIC_COLORS.get(kind, (150, 150, 150)), OBSTACLE_HALF_WIDTH)
+                    _, ty, twidth, _ = track.segment_at(trk, car_z)
+                    sprites.append((car_z, offset * twidth, ty, kind))
                 i += 1
+
+            sprites.sort()
+            i = len(sprites) - 1
+            while i >= 0:
+                sz, sx, sy, kind = sprites[i]
+                bi = int((sz - player_z) / SEGMENT_LENGTH)
+                if bi < 0:
+                    bi = 0
+                elif bi >= DRAW_DISTANCE:
+                    bi = DRAW_DISTANCE - 1
+                # Sprites ride the same per-frame curve accumulator as the
+                # road bands, or they would sit on the camera's straight-ahead
+                # line while the road they belong to bends away from it.
+                if n_curve == 0:
+                    coff = 0.0
+                elif bi >= n_curve:
+                    coff = curve_off[n_curve - 1]
+                else:
+                    coff = curve_off[bi]
+                sp = sprite_pal[bi]
+                draw_sprite(screen, coff + sx - player_x, sy, sz, cam_y, cam_z,
+                            sp.get(kind, sp['']), OBSTACLE_HALF_WIDTH)
+                i -= 1
 
             draw_car(screen, player_x / (trk['width'] * 2.0))
             pygame.display.flip()
@@ -641,6 +1073,10 @@ def main():
 
         tx.close({'outcome': outcome, 'elapsed': elapsed, 'hits': hits, 'par': trk['par'],
                   'frames': frames, 'avg_fps': avg_fps})
+
+        if draw_result(screen, outcome, elapsed, hits, trk['par']):
+            hold_result(screen)
+
         pygame.quit()
         sys.stdout.write('RESULT outcome=%s elapsed=%.1f hits=%d par=%g frames=%d avg_fps=%.1f\n' % (
             outcome, elapsed, hits, trk['par'], frames, avg_fps))
