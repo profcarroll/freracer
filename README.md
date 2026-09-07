@@ -134,18 +134,33 @@ this tool (bytes to atoms — a human carries it over with `scp`).
 
 ## Known behaviour / open questions
 
-- **Physics constants are still starting points, render distance is now measured.**
-  `DRAW_DISTANCE` (120) is tuned from real `tools/racer_fps.py` numbers on the N900.
-  `MAX_SPEED`, `STEER_GAIN` and `CENTRIFUGAL` at the top of `game.py` are not yet tuned
-  from a human play-test, the way fremarble's marble physics were only trusted after one.
-- **Steering reuses fremarble's tilt convention** (adjusted, calibrated `raw_y`, 3-sample
-  smoothed, 40 mg dead zone) on the assumption the device is held the same way. Revisit
-  if that assumption is wrong for a landscape racer grip.
+- **First playtest (2026-09-07) found the game was not really playable**: steering used
+  fremarble's `raw_y` axis, which barely moves when the phone is held landscape for a
+  racer; the road was flat, low-contrast, and had no roadside detail, so it was hard to
+  tell where you were on it; and the vibrator sysfs path is root-only, so haptics never
+  actually fired when launched as `user` from the desktop. All three are now fixed (see
+  the corresponding commit and `game.py` comments): steering reads `raw_x`, measured live
+  on-device by rolling the phone and watching which axis actually moved; haptics go
+  through MCE's `req_vibrator_pattern_activate` D-Bus call instead of the sysfs file;
+  and `draw_road` now draws a banded, alternating-colour shoulder plus roadside marker
+  poles every 5 segments, on top of higher-contrast road paint. **Still needs a real
+  human playtest** to confirm it feels right - only bot-driven and render-only tests
+  have run so far.
+- **Physics constants are still starting points.** `DRAW_DISTANCE` (120) is tuned from
+  real `tools/racer_fps.py` numbers; with the new shoulder/pole rendering the full game
+  loop runs ~35-43 fps under sustained off-road bot steering (vs ~49 fps for bare-road
+  rendering in isolation) - stable, but re-run `racer_fps.py` and reconsider
+  `DRAW_DISTANCE` if more roadside detail is added. `MAX_SPEED`, `STEER_GAIN` and
+  `CENTRIFUGAL` are not yet tuned from a human play-test.
 - **Traffic loops the lap on a timer, not a queue**: each `TRAFFIC` car's position is a
   pure function of race time and lap length, so it's always somewhere on the ribbon, but
   it does not react to the player or to other traffic.
 - **No collision cooldown tuning yet**: obstacles hit once and stay disabled for the run;
   traffic has a flat 2 s cooldown after a hit. Untested for feel.
+- **Haptics are debounced, not continuous**: curb/grass buzz at most every 0.35 s while
+  sustained (an early version buzzed every frame, which meant forking a `dbus-send`
+  process per frame and cut fps from ~49 to ~18 in testing) - hits are already one-shot
+  per obstacle/traffic car so they didn't need debouncing.
 
 ## License
 

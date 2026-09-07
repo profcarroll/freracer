@@ -1,11 +1,14 @@
 import math
 import os
 import re
+import subprocess
 import sys
 import time
 import pygame
 import track
 from telemetry import Telemetry
+
+DEVNULL = open(os.devnull, 'wb')
 
 ACCEL_PATH = '/sys/class/i2c-adapter/i2c-3/3-001d/coord'
 VIBRATOR = '/sys/class/leds/twl4030:vibrator/brightness'
@@ -17,8 +20,9 @@ DRAW_DISTANCE = track.DRAW_DISTANCE
 CAMERA_HEIGHT = track.CAMERA_HEIGHT
 CAMERA_DEPTH = 1.0 / math.tan((track.FIELD_OF_VIEW / 2.0) * math.pi / 180.0)
 
-# --- steering / calibration (same convention as fremarble: raw_y adjusted by
-# the level reading at startup drives left/right motion) ---
+# --- steering / calibration: raw_x (roll axis when held landscape) adjusted
+# by the level reading at startup drives left/right motion. See main()'s
+# calibration block for the on-device measurement that picked this axis. ---
 CALIBRATION_WINDOW = 0.5
 TILT_DEAD_ZONE = 40.0
 STEER_GAIN = 5.0          # world units/sec of lateral speed per milli-g at full speed
@@ -59,11 +63,17 @@ THEMES = {
 }
 DEFAULT_THEME = 'autumn-hills'
 
-ROAD_COLOR = (80, 80, 84)
-ROAD_COLOR2 = (90, 90, 94)
+ROAD_COLOR = (60, 60, 66)
+ROAD_COLOR2 = (100, 100, 108)
 RUMBLE_LIGHT = (200, 60, 60)
 RUMBLE_DARK = (230, 230, 230)
 LANE_COLOR = (230, 220, 60)
+POLE_LIGHT = (220, 40, 40)
+POLE_DARK = (240, 240, 240)
+POLE_INTERVAL = 5             # segments between roadside marker poles (500 world units)
+POLE_OFFSET = 1.22            # fraction of half-width, just outside the rumble strip
+POLE_HALF_WIDTH = 28.0
+POLE_HEIGHT = 260.0
 
 OBSTACLE_COLORS = {
     'rock': (110, 105, 100),
@@ -118,21 +128,41 @@ def write_vibrator(value):
         pass
 
 
-def buzz_vibrator(now, duration_ms, vibrate_until, vibrator_on):
-    until = now + duration_ms / 1000.0
-    if until > vibrate_until:
-        vibrate_until = until
-    if not vibrator_on:
-        write_vibrator('255')
-        vibrator_on = 1
-    return vibrate_until, vibrator_on
+VIBRATOR_PATTERNS = {
+    'curb': 'PatternTouchscreen',        # short, light tap (curb)
+    'grass': 'PatternChatAndEmail',      # medium single buzz
+    'hit': 'PatternIncomingMessage',     # strong, self-repeating ~1s (any collision)
+    'finish': 'PatternChatAndEmail',
+}
 
 
-def update_vibrator(now, vibrate_until, vibrator_on):
-    if vibrator_on and now >= vibrate_until:
-        write_vibrator('0')
-        vibrator_on = 0
-    return vibrator_on
+def buzz_pattern(name):
+    # /sys/class/leds/twl4030:vibrator/brightness (write_vibrator, above) is
+    # root-only (0644, root:root); a game launched from the Hildon desktop
+    # runs as the unprivileged 'user' account and silently can't write it -
+    # haptics never actually fired. write_vibrator() is kept only in case a
+    # future root-run mode wants it. The permission-safe path is MCE's own
+    # vibrator-pattern D-Bus API, which 'user' can call directly (verified:
+    # req_vibrator_pattern_activate works unprivileged). Patterns are
+    # named/fixed (see /etc/mce/mce.ini [VibraPatternRX51]) rather than
+    # arbitrary durations, so events are mapped to the closest-feeling
+    # built-in pattern instead of a custom on/off timing.
+    try:
+        subprocess.Popen((
+            'dbus-send', '--system', '--type=method_call',
+            '--dest=com.nokia.mce', '/com/nokia/mce/request',
+            'com.nokia.mce.request.req_vibrator_pattern_activate',
+            'string:' + name,
+        ), stdout=DEVNULL, stderr=DEVNULL)
+    except Exception:
+        pass
+
+
+def buzz_event(event_name):
+    pattern = VIBRATOR_PATTERNS.get(event_name)
+    if pattern:
+        buzz_pattern(pattern)
+
 
 
 def project(world_x, world_y, world_z, cam_x, cam_y, cam_z, road_width):
@@ -205,6 +235,7 @@ def draw_road(screen, bg, trk, player_z, player_x):
     screen.blit(bg, (0, 0))
     segments = trk['segments']
     n = len(segments)
+    theme = THEMES.get(trk.get('theme', DEFAULT_THEME), THEMES[DEFAULT_THEME])
 
     base_index = int(player_z / SEGMENT_LENGTH)
     if base_index >= n - 1:
@@ -242,6 +273,16 @@ def draw_road(screen, bg, trk, player_z, player_x):
         band = (idx // 3) % 2
         road_color = ROAD_COLOR if band == 0 else ROAD_COLOR2
         rumble_color = RUMBLE_LIGHT if band == 0 else RUMBLE_DARK
+        shoulder_color = theme['grass'] if band == 0 else theme['grass2']
+
+        # Shoulder: a banded strip wider than the rumble strip, so the ground
+        # right next to the road visibly scrolls past too - without this the
+        # whole periphery was one flat static colour and nothing but the road
+        # itself read as "moving", which is why the road edge was hard to place.
+        sw1 = w1 * (RUMBLE_ZONE + 1.2)
+        sw2 = w2 * (RUMBLE_ZONE + 1.2)
+        pygame.draw.polygon(screen, shoulder_color, (
+            (x1 - sw1, y1), (x1 + sw1, y1), (x2 + sw2, y2), (x2 - sw2, y2)))
 
         rw1 = w1 * RUMBLE_ZONE
         rw2 = w2 * RUMBLE_ZONE
@@ -255,6 +296,14 @@ def draw_road(screen, bg, trk, player_z, player_x):
             lw2 = w2 * 0.03
             pygame.draw.polygon(screen, LANE_COLOR, (
                 (x1 - lw1, y1), (x1 + lw1, y1), (x2 + lw2, y2), (x2 - lw2, y2)))
+
+        if idx % POLE_INTERVAL == 0:
+            pole_color = POLE_LIGHT if (idx // POLE_INTERVAL) % 2 == 0 else POLE_DARK
+            pw1 = w1 * POLE_OFFSET
+            draw_pole(screen, a['x'] - pw1, a['y'], z1, cam_x, cam_y, cam_z,
+                      pole_color, POLE_HALF_WIDTH, POLE_HEIGHT)
+            draw_pole(screen, a['x'] + pw1, a['y'], z1, cam_x, cam_y, cam_z,
+                      pole_color, POLE_HALF_WIDTH, POLE_HEIGHT)
 
         max_y = y1
         i -= 1
@@ -270,6 +319,27 @@ def draw_sprite(screen, world_x, world_y, world_z, cam_x, cam_y, cam_z, color, h
         return
     h = w * 1.4
     rect = pygame.Rect(int(x - w), int(y - h), int(w * 2), int(h))
+    if rect.bottom < 0 or rect.top > H:
+        return
+    pygame.draw.rect(screen, color, rect)
+
+
+def draw_pole(screen, world_x, ground_y, world_z, cam_x, cam_y, cam_z, color, half_w, height):
+    # Roadside marker post: projects the ground point and a point `height`
+    # above it separately (unlike draw_sprite, whose height is tied to its
+    # projected half-width) so poles read as a consistent physical size
+    # planted on the shoulder, not a blob scaled only by lane width.
+    if world_z <= cam_z:
+        return
+    bx, by, bw, bscale = project(world_x, ground_y, world_z, cam_x, cam_y, cam_z, half_w)
+    if bscale <= 0.0:
+        return
+    _, ty, _, _ = project(world_x, ground_y + height, world_z, cam_x, cam_y, cam_z, half_w)
+    top = int(ty)
+    bottom = int(by)
+    if bottom <= top:
+        return
+    rect = pygame.Rect(int(bx - bw), top, int(bw * 2), bottom - top)
     if rect.bottom < 0 or rect.top > H:
         return
     pygame.draw.rect(screen, color, rect)
@@ -349,11 +419,15 @@ def main():
     calibration_sum = 0.0
     calibration_count = 0
     calibrated = 0
-    level_y = 0.0
+    level_x = 0.0
     tilt_history = []
 
-    vibrate_until = 0.0
-    vibrator_on = 0
+    # Zone buzzes (curb/grass) are sustained states, not one-shot events, so
+    # they're debounced on a cooldown instead of firing (and forking a fresh
+    # dbus-send process) every single frame - that alone cut avg fps from
+    # ~49 to ~18 in an on-device bot test before this fix.
+    ZONE_BUZZ_COOLDOWN = 0.35
+    next_zone_buzz = 0.0
 
     try:
         while not outcome:
@@ -362,8 +436,6 @@ def main():
             if timeout_s is not None and race_t >= timeout_s:
                 outcome = 'timeout'
                 break
-
-            vibrator_on = update_vibrator(frame_now, vibrate_until, vibrator_on)
 
             for e in pygame.event.get():
                 if e.type == pygame.QUIT or e.type == pygame.KEYDOWN or e.type == pygame.MOUSEBUTTONDOWN:
@@ -382,17 +454,23 @@ def main():
             last_tilt = read_tilt(tilt_path, last_tilt)
             raw_x, raw_y, raw_z = last_tilt
 
+            # Steering reads raw_x, not raw_y: measured on-device (2026-09-07)
+            # holding the phone landscape (as this game requires) and rolling
+            # it left made raw_x swing from ~30 to ~650+ mg while raw_y/raw_z
+            # stayed within their resting noise band. raw_y was fremarble's
+            # axis for its flat-on-a-table tilt game; a landscape-held racer
+            # needs the roll axis instead, which is raw_x on this device/grip.
             if not calibrated:
-                calibration_sum += raw_y
+                calibration_sum += raw_x
                 calibration_count += 1
                 if race_t >= CALIBRATION_WINDOW and calibration_count > 0:
-                    level_y = calibration_sum / calibration_count
+                    level_x = calibration_sum / calibration_count
                     calibrated = 1
                     tilt_history = []
                 steer_tilt = 0.0
             else:
-                adj_y = raw_y - level_y
-                tilt_history.append(adj_y)
+                adj_x = raw_x - level_x
+                tilt_history.append(adj_x)
                 if len(tilt_history) > 3:
                     del tilt_history[0]
                 s = 0.0
@@ -431,23 +509,29 @@ def main():
                     if speed < target_max:
                         speed = target_max
 
-                wall_buzz_ms = 0
+                buzz_key = None
                 if in_grass:
                     speed -= BRAKE_DECEL * dt
-                    wall_buzz_ms = 60
                     if not pending_event:
                         pending_event = 'grass'
+                    if frame_now >= next_zone_buzz:
+                        buzz_key = 'grass'
+                        next_zone_buzz = frame_now + ZONE_BUZZ_COOLDOWN
                 elif in_rumble:
-                    wall_buzz_ms = 25
                     if not pending_event:
                         pending_event = 'curb'
+                    if frame_now >= next_zone_buzz:
+                        buzz_key = 'curb'
+                        next_zone_buzz = frame_now + ZONE_BUZZ_COOLDOWN
                 if speed < 0.0:
                     speed = 0.0
 
                 speed_frac = speed / MAX_SPEED
                 if speed_frac < STEER_MIN_SPEED_FRAC:
                     speed_frac = STEER_MIN_SPEED_FRAC
-                player_x += steer_tilt * STEER_GAIN * speed_frac * dt
+                # Rolling the device left (raw_x rises, see calibration above)
+                # steers left, i.e. decreases player_x - hence the minus sign.
+                player_x -= steer_tilt * STEER_GAIN * speed_frac * dt
                 player_x -= curve * speed * CENTRIFUGAL * dt
 
                 # Hard bound so a missed corner is recoverable instead of an
@@ -464,22 +548,22 @@ def main():
                 if oi >= 0:
                     speed *= HIT_SPEED_SCALE
                     hits += 1
-                    wall_buzz_ms = 180
+                    buzz_key = 'hit'
                     pending_event = 'hit-' + okind
 
                 ti, tkind = find_traffic_hit(trk['traffic'], player_z, player_x, race_t, trk, traffic_cooldowns)
                 if ti >= 0:
                     speed *= HIT_SPEED_SCALE
                     hits += 1
-                    wall_buzz_ms = 220
+                    buzz_key = 'hit'
                     pending_event = 'hit-' + tkind
 
-                if wall_buzz_ms > 0:
-                    vibrate_until, vibrator_on = buzz_vibrator(frame_now, wall_buzz_ms, vibrate_until, vibrator_on)
+                if buzz_key:
+                    buzz_event(buzz_key)
 
             if player_z >= trk['lap_length']:
                 outcome = 'finish'
-                vibrate_until, vibrator_on = buzz_vibrator(frame_now, 150, vibrate_until, vibrator_on)
+                buzz_event('finish')
 
             base_index, cam_x, cam_y, cam_z = draw_road(screen, bg, trk, player_z, player_x)
 
@@ -514,7 +598,7 @@ def main():
 
             sample_now = time.time()
             if sample_now - last_sample >= 0.1:
-                tx.sample(sample_now - t0, player_z, speed, player_x, raw_y, pending_event)
+                tx.sample(sample_now - t0, player_z, speed, player_x, raw_x, pending_event)
                 pending_event = ''
                 last_sample = sample_now
             if sample_now - last_second >= 1.0:
@@ -541,7 +625,19 @@ def main():
             return 3
         return 1
     finally:
-        write_vibrator('0')
+        # Patterns are self-terminating (fixed repeat counts, see mce.ini), but
+        # explicitly deactivate on any exit path (including exceptions) so a
+        # crash mid-pattern can't leave the vibrator buzzing after quit.
+        for pattern_name in set(VIBRATOR_PATTERNS.values()):
+            try:
+                subprocess.Popen((
+                    'dbus-send', '--system', '--type=method_call',
+                    '--dest=com.nokia.mce', '/com/nokia/mce/request',
+                    'com.nokia.mce.request.req_vibrator_pattern_deactivate',
+                    'string:' + pattern_name,
+                ), stdout=DEVNULL, stderr=DEVNULL)
+            except Exception:
+                pass
 
 
 if __name__ == '__main__':
