@@ -5,6 +5,9 @@
 # Everything here also runs by hand (packaging/build-deb.sh, build-repo.sh);
 # the workflow exists so a tag is enough, and so the artifacts a person
 # downloads are built from exactly the tagged tree.
+#
+# It creates a *draft*. A person reads the notes and presses publish - same
+# rule as the device: nothing ships that a human has not looked at.
 name: release
 
 on:
@@ -50,6 +53,7 @@ jobs:
         run: |
           version="$(cat VERSION)"
           gh release create "v${version}" \
+            --draft \
             --title "freracer v${version}" \
             --notes-file packaging/release-notes.md \
             dist/freracer_*.deb \
