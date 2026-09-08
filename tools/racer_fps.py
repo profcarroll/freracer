@@ -24,8 +24,14 @@ import pygame
 import track
 import window
 import game
+import music
 
 args = sys.argv[1:]
+# --music: run the soundtrack alongside the renderer. Expect roughly a third
+# of the frame rate to go to PulseAudio whatever the music is doing.
+with_music = '--music' in args
+if with_music:
+    args.remove('--music')
 seed = None
 if '--journey' in args:
     j = args.index('--journey')
@@ -79,6 +85,8 @@ else:
     themes = sorted(game.regions.REGIONS.keys())
     label = 'journey %d' % seed
 
+if with_music:
+    pygame.mixer.pre_init(*music.MIXER_ARGS)
 pygame.init()
 pygame.mouse.set_visible(False)
 screen = pygame.display.set_mode((game.W, game.H), pygame.FULLSCREEN, 16)
@@ -94,6 +102,9 @@ player_z = 0.0
 player_x = 200.0
 speed = 4000.0
 starves = 0
+snd = None
+if with_music:
+    snd = music.Music(1, win.region_at(0.0))
 
 log = open(LOG, 'w')
 log.write('t,fps,draw_distance\n')
@@ -118,6 +129,9 @@ while running and time.time() - t0 < SECONDS:
     starves += win.feed(player_z)
     win.trim(player_z)
     game.draw_road(screen, bgs, backdrops, win, palettes, player_z, player_x)
+    if snd is not None:
+        # Told it is going flat out so every layer of the arrangement plays.
+        snd.update(music.road_context(win, player_z, 5800.0, game.MAX_SPEED, 'road', track.SEGMENT_LENGTH))
     pygame.display.flip()
 
     frames += 1
@@ -133,6 +147,11 @@ while running and time.time() - t0 < SECONDS:
 
 elapsed = time.time() - t0
 log.close()
+if snd is not None:
+    st = snd.stats()
+    snd.stop()
+    print 'music blocks=%d starves=%d at=%s renders=%d worst_step_ms=%.1f' % (
+        st['blocks'], st['starves'], st['starve_at'], st['renders'], st['worst_step_ms'])
 pygame.quit()
 print '%s draw_distance=%d min_band_h=%.1f frames=%d elapsed=%.1fs avg_fps=%.1f worst_second_fps=%.1f starves=%d segments=%d log=%s' % (
     label, track.DRAW_DISTANCE, game.MIN_BAND_HEIGHT, frames, elapsed, frames / elapsed, worst,

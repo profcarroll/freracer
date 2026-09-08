@@ -33,7 +33,7 @@ OPTS="$OPTS -o ConnectTimeout=15"
 # Only what Python 2.5 on the device actually runs. tools/generate_track.py
 # (talks to sld-cloud) and tools/render_shot.py + tools/fake_pygame.py (the
 # off-device renderer) are Python 3 and stay on the laptop.
-GAME="game.py track.py rng.py regions.py journey.py window.py telemetry.py bot_steer.py buzz_helper.py test_track.py test_journey.py"
+GAME="game.py track.py rng.py regions.py journey.py window.py telemetry.py bot_steer.py buzz_helper.py test_track.py test_journey.py synth.py music.py"
 
 echo "-> $HOST:$DEST"
 ssh $OPTS "$HOST" "mkdir -p $DEST/tracks $DEST/tools $DEST/desktop"

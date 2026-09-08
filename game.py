@@ -9,6 +9,12 @@ import track
 import regions
 import rng
 import window as winmod
+try:
+    import music
+except ImportError:
+    # audioop is gone from Python 3.13+, so the laptop's fake_pygame runs
+    # of game.main() (render_shot.py) go without a soundtrack.
+    music = None
 from telemetry import Telemetry
 
 DEVNULL = open(os.devnull, 'wb')
@@ -810,13 +816,20 @@ def _is_int(s):
 
 
 USAGE = ('usage: python2.5 game.py <track.trk> [tilt_source] [telemetry_csv] [timeout_s]\n'
-         '       python2.5 game.py --journey [seed] [tilt_source] [telemetry_csv] [timeout_s]\n')
+         '       python2.5 game.py --journey [seed] [tilt_source] [telemetry_csv] [timeout_s]\n'
+         '       --mute anywhere in either form runs without the soundtrack\n')
 
 MILE = 1000.0                 # segments; keeps the odometer human-sized
 
 
 def main():
     argv = sys.argv[1:]
+    # The soundtrack costs about a third of the CPU on the N900 - PulseAudio's
+    # share, not the synth's (docs/SOUNDTRACK.md) - so it can be switched off.
+    music_on = music is not None and not os.environ.get('FRERACER_MUTE')
+    while '--mute' in argv:
+        argv.remove('--mute')
+        music_on = 0
     seed = None
     track_path = None
     if argv and argv[0] == '--journey':
@@ -864,6 +877,9 @@ def main():
     # start_buzz_helper()'s comment.
     buzz_helper = start_buzz_helper()
 
+    if music_on:
+        # 4096-sample buffer: measured knee of the PulseAudio cost, see music.py.
+        pygame.mixer.pre_init(*music.MIXER_ARGS)
     pygame.init()
     pygame.mouse.set_visible(False)
     screen = pygame.display.set_mode((W, H), pygame.FULLSCREEN, 16)
@@ -881,6 +897,18 @@ def main():
     odo_text = ''
     odo_surf = None
     tx = Telemetry(telemetry_path)
+
+    # Built before t0: rendering the drum kit takes ~0.5 s on the device and
+    # must not eat the tilt calibration window.
+    snd = None
+    if music_on:
+        try:
+            snd = music.Music(seed, win.region_at(0.0))
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            sys.stderr.write('soundtrack disabled\n')
+            snd = None
 
     player_z = 0.0
     player_x = 0.0
@@ -976,6 +1004,7 @@ def main():
                 i += 1
 
             curve, _, width, _ = win.segment_at(player_z)
+            surface = 'road'
 
             if calibrated:
                 # Zone is judged on this frame's *incoming* position, before the car
@@ -985,6 +1014,12 @@ def main():
                 off_road = abs_x > width * 1.0
                 in_grass = abs_x > width * GRASS_ZONE
                 in_rumble = (not in_grass) and abs_x > width * RUMBLE_ZONE
+                if in_grass:
+                    surface = 'grass'
+                elif off_road:
+                    surface = 'offroad'
+                elif in_rumble:
+                    surface = 'curb'
 
                 # One target speed per surface, approached from either side:
                 # below it the throttle pulls up to it, above it the surface
@@ -1059,10 +1094,14 @@ def main():
 
                 if buzz_key:
                     buzz_event(buzz_helper, buzz_key)
+                    if snd is not None:
+                        snd.event(buzz_key)
 
             if win.finish is not None and player_z >= win.lap_length:
                 outcome = 'finish'
                 buzz_event(buzz_helper, 'finish')
+                if snd is not None:
+                    snd.event('finish')
 
             # Keep the road ahead of the camera: one stretch per frame at
             # most, so generation cost is spread rather than spiking (see
@@ -1079,6 +1118,11 @@ def main():
                 regions_seen.append(region)
                 if not pending_event:
                     pending_event = 'region-' + region
+
+            if snd is not None:
+                # Reads the road ahead of the car (music.road_context), and
+                # spends at most a few ms rendering the next beat.
+                snd.update(music.road_context(win, player_z, speed, MAX_SPEED, surface, SEGMENT_LENGTH))
 
             base_index, cam_y, cam_z, curve_off = draw_road(
                 screen, bgs, backdrops, win, palettes, player_z, player_x)
@@ -1167,6 +1211,11 @@ def main():
             outcome = 'stop'
 
         distance = int(player_z / SEGMENT_LENGTH)
+        music_stats = None
+        if snd is not None:
+            music_stats = snd.stats()
+            if outcome != 'finish':
+                snd.stop()
         region_list = ','.join(regions_seen)
         rerolls = 0
         if win.gen is not None:
@@ -1174,7 +1223,8 @@ def main():
         tx.close({'outcome': outcome, 'elapsed': elapsed, 'hits': hits, 'par': win.par,
                   'frames': frames, 'avg_fps': avg_fps, 'seed': seed,
                   'distance': distance, 'regions': region_list,
-                  'chunks': len(win.chunk_log), 'rerolls': rerolls, 'starves': starves})
+                  'chunks': len(win.chunk_log), 'rerolls': rerolls, 'starves': starves,
+                  'music_starves': music_stats and music_stats['starves'] or 0})
 
         journey_info = None
         if win.finish is None:
@@ -1187,6 +1237,10 @@ def main():
                          'seed=%d distance=%d regions=%s\n' % (
                              outcome, elapsed, hits, win.par, frames, avg_fps,
                              seed, distance, region_list))
+        if music_stats is not None:
+            sys.stdout.write('MUSIC blocks=%d starves=%d renders=%d worst_step_ms=%.1f\n' % (
+                music_stats['blocks'], music_stats['starves'], music_stats['renders'],
+                music_stats['worst_step_ms']))
         sys.stdout.flush()
         if outcome == 'finish' or outcome == 'stop':
             return 0
