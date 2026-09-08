@@ -5,3 +5,4 @@ telemetry/*.csv
 tools/racer_fps.csv
 *.candidate
 *.log
+dist/

@@ -1,12 +1,37 @@
 #!/bin/sh
-# Maemo/Hildon desktop launcher for freracer. Installed as /usr/bin/freracer
-# by desktop/install.sh; invoked with no arguments by the .desktop entry.
-# Starts a journey (the infinite road, docs/INFINITE-ROAD-SPEC.md) seeded
-# from the clock; `python2.5 game.py tracks/001-autumn-hills.trk` from a
-# shell still runs a finite lap. Re-run desktop/install.sh on the device
-# after changing this file.
+# Maemo/Hildon desktop launcher for freracer. Invoked with no arguments by
+# freracer.desktop. Starts a journey (the infinite road,
+# docs/INFINITE-ROAD-SPEC.md) seeded from the clock; `python2.5 game.py
+# tracks/001-autumn-hills.trk` from a shell still runs a finite lap.
+#
+# Installed as /usr/bin/freracer by two different routes, which is why it
+# has to find the game rather than hard-code it:
+#   - the .deb (packaging/build-deb.sh), game in /opt/freracer
+#   - desktop/install.sh, the from-source dev flow, game wherever
+#     tools/deploy.sh put it (/home/user/MyDocs/freracer)
+# Set FRERACER_HOME to override; the packaged copy wins by default, so a
+# dev tree is picked up only when no package is installed.
 set -e
-GAMEDIR=/home/user/MyDocs/freracer
-LOG="$GAMEDIR/freracer.log"
-cd "$GAMEDIR"
-exec python2.5 game.py --journey >>"$LOG" 2>&1
+
+if [ -n "$FRERACER_HOME" ]; then
+    GAMEDIR=$FRERACER_HOME
+else
+    GAMEDIR=
+    for d in /opt/freracer /home/user/MyDocs/freracer; do
+        if [ -f "$d/game.py" ]; then GAMEDIR=$d; break; fi
+    done
+fi
+if [ -z "$GAMEDIR" ]; then
+    echo "freracer: no game.py in /opt/freracer or /home/user/MyDocs/freracer" >&2
+    exit 1
+fi
+
+# game.py resolves tracks/ and buzz_helper.py from its own __file__, but it
+# writes this run's telemetry CSV under the *working* directory. /opt is
+# root-owned and Hildon launches us as `user`, so run from a writable data
+# directory instead of from GAMEDIR.
+DATADIR=${FRERACER_DATA:-$HOME/.freracer}
+mkdir -p "$DATADIR"
+cd "$DATADIR"
+
+exec python2.5 "$GAMEDIR/game.py" --journey >>"$DATADIR/freracer.log" 2>&1

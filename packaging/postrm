@@ -1,0 +1,9 @@
+#!/bin/sh
+# Leaves ~/.freracer (logs, telemetry) alone on purpose: it is the player's
+# data, not ours.
+set -e
+if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
+    gtk-update-icon-cache -f /usr/share/icons/hicolor >/dev/null 2>&1 || true
+    update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
+fi
+exit 0
