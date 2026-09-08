@@ -33,17 +33,19 @@ OPTS="$OPTS -o ConnectTimeout=15"
 # Only what Python 2.5 on the device actually runs. tools/generate_track.py
 # (talks to sld-cloud) and tools/render_shot.py + tools/fake_pygame.py (the
 # off-device renderer) are Python 3 and stay on the laptop.
-GAME="game.py track.py telemetry.py bot_steer.py buzz_helper.py test_track.py"
+GAME="game.py track.py rng.py regions.py journey.py window.py telemetry.py bot_steer.py buzz_helper.py test_track.py test_journey.py"
 
 echo "-> $HOST:$DEST"
 ssh $OPTS "$HOST" "mkdir -p $DEST/tracks $DEST/tools $DEST/desktop"
 scp $OPTS $GAME "$HOST:$DEST/"
 scp $OPTS tracks/*.trk tracks/FORMAT.md "$HOST:$DEST/tracks/"
-scp $OPTS tools/racer_fps.py "$HOST:$DEST/tools/"
+scp $OPTS tools/racer_fps.py tools/journey_dump.py tools/journey_export.py "$HOST:$DEST/tools/"
 scp $OPTS desktop/freracer desktop/freracer.desktop desktop/freracer.png \
          desktop/install.sh "$HOST:$DEST/desktop/"
 
 echo
 echo "deployed. next, on the device:"
 echo "  n900 'cd $DEST && python2.5 test_track.py'"
+echo "  n900 'cd $DEST && python2.5 test_journey.py --quick'"
 echo "  n900 'cd $DEST && DISPLAY=:0 python2.5 tools/racer_fps.py 15 120'"
+echo "  n900 'cd $DEST && DISPLAY=:0 python2.5 tools/racer_fps.py 60 --journey 4471'"

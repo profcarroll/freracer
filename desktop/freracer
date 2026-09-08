@@ -1,10 +1,12 @@
 #!/bin/sh
 # Maemo/Hildon desktop launcher for freracer. Installed as /usr/bin/freracer
-# by desktop/install.sh; invoked with no arguments by the .desktop entry, so
-# game.py's default_track_path() picks the lowest-numbered track and runs
-# untimed (see game.py main()).
+# by desktop/install.sh; invoked with no arguments by the .desktop entry.
+# Starts a journey (the infinite road, docs/INFINITE-ROAD-SPEC.md) seeded
+# from the clock; `python2.5 game.py tracks/001-autumn-hills.trk` from a
+# shell still runs a finite lap. Re-run desktop/install.sh on the device
+# after changing this file.
 set -e
 GAMEDIR=/home/user/MyDocs/freracer
 LOG="$GAMEDIR/freracer.log"
 cd "$GAMEDIR"
-exec python2.5 game.py >>"$LOG" 2>&1
+exec python2.5 game.py --journey >>"$LOG" 2>&1

@@ -1,4 +1,5 @@
 # track.py - load, build and validate freracer .trk files
+# Also the segment expander the infinite road shares (expand_stretch).
 # Python 2.5 safe: no json, no with, no print(), no dict comprehensions.
 
 SCREEN_W = 800
@@ -23,51 +24,68 @@ def _ease(t):
     return t * t * (3.0 - 2.0 * t)
 
 
-def _build_segments(roads, width):
-    """Expand ROAD <segments> <curve> <hill> stretches into a flat segment list.
+def expand_stretch(out, count, curve, hill, width0, width1, y, heading, region):
+    """Append one ROAD stretch's segments to `out`. Returns (y, heading) after it.
 
-    Each segment dict: {'curve': float, 'y': float, 'width': float, 'x': float}
-    curve/height are eased in over the first third of a stretch, held over the
-    middle third, and eased back out over the last third, so consecutive
-    stretches never produce a discontinuous kink in the road. 'x' is the
-    cumulative world-space lateral centreline position, integrated from curve
-    once here so the renderer never has to re-derive it per frame.
+    Each segment dict: {'curve', 'y', 'width', 'heading', 'region'}.
+    curve is eased in over the first third of the stretch, held over the
+    middle third and eased back out over the last third; height is eased
+    with smoothstep over the whole stretch; width ramps linearly from width0
+    to width1. Every stretch therefore starts and ends at curve ~0 with y
+    continuous, so any two stretches join without a kink - the property the
+    infinite road's chunk stitching rests on (docs/INFINITE-ROAD-SPEC.md 2).
+
+    'heading' is the running sum of curve up to (not including) this
+    segment: what the renderer pans the horizon backdrop by. It replaces the
+    absolute centreline x an earlier version integrated here, which grows
+    without bound on an infinite road and which nothing projects any more.
+    """
+    count = int(count)
+    third = count / 3.0
+    if third < 1.0:
+        third = 1.0
+    j = 0
+    while j < count:
+        t = (j + 1) / float(count)
+        if j < third:
+            ramp = _ease(j / third)
+        elif j > count - third:
+            ramp = _ease((count - j) / third)
+        else:
+            ramp = 1.0
+        seg_curve = curve * ramp
+        out.append({'curve': seg_curve,
+                    'y': y + hill * _ease(t),
+                    'width': width0 + (width1 - width0) * t,
+                    'heading': heading,
+                    'region': region})
+        heading += seg_curve
+        j += 1
+    return y + hill, heading
+
+
+def _build_segments(roads, width, region='track'):
+    """Expand ROAD stretches into a flat segment list.
+
+    Each road is (segments, curve, hill) or (segments, curve, hill, width),
+    where a fourth element is the width the stretch ramps *to*; without one
+    the stretch keeps the width it started at. Widths in world units are
+    half-widths, as everywhere else.
     """
     segments = []
     y = 0.0
+    heading = 0.0
+    w = width
     i = 0
     while i < len(roads):
-        count, curve, hill = roads[i]
-        count = int(count)
-        base_y = y
-        j = 0
-        while j < count:
-            t = (j + 1) / float(count)
-            third = count / 3.0
-            if third < 1.0:
-                third = 1.0
-            if j < third:
-                ramp = _ease(j / third)
-            elif j > count - third:
-                ramp = _ease((count - j) / third)
-            else:
-                ramp = 1.0
-            seg_curve = curve * ramp
-            seg_y = base_y + hill * _ease(t)
-            segments.append({'curve': seg_curve, 'y': seg_y, 'width': width, 'x': 0.0})
-            j += 1
-        y = base_y + hill
+        road = roads[i]
+        w1 = w
+        if len(road) > 3:
+            w1 = road[3]
+        y, heading = expand_stretch(segments, road[0], road[1], road[2],
+                                    w, w1, y, heading, region)
+        w = w1
         i += 1
-
-    track_x = 0.0
-    dx = 0.0
-    i = 0
-    while i < len(segments):
-        segments[i]['x'] = track_x
-        track_x += dx
-        dx += segments[i]['curve']
-        i += 1
-
     return segments
 
 
@@ -77,14 +95,10 @@ def _pad_runway(segments, count):
     if not segments:
         return
     last = segments[-1]
-    dx = 0.0
-    if len(segments) >= 2:
-        dx = last['x'] - segments[-2]['x']
-    x = last['x'] + dx
     i = 0
     while i < count:
-        segments.append({'curve': 0.0, 'y': last['y'], 'width': last['width'], 'x': x})
-        x += dx
+        segments.append({'curve': 0.0, 'y': last['y'], 'width': last['width'],
+                         'heading': last['heading'], 'region': last['region']})
         i += 1
 
 
@@ -107,6 +121,11 @@ def load(path):
         'finish_segment': None,
     }
 
+    # WIDTH before the first ROAD sets the starting half-width. WIDTH between
+    # ROAD lines makes the *next* stretch ramp linearly to the new value -
+    # how an exported journey carries a region's width change across.
+    pending_width = None
+    cur_width = DEFAULT_WIDTH
     for raw in lines:
         line = raw.strip()
         if not line or line[0] == '#':
@@ -122,9 +141,16 @@ def load(path):
         elif kw == 'PAR':
             trk['par'] = float(parts[1])
         elif kw == 'WIDTH':
-            trk['width'] = float(parts[1])
+            if trk['roads']:
+                pending_width = float(parts[1])
+            else:
+                trk['width'] = float(parts[1])
+                cur_width = trk['width']
         elif kw == 'ROAD':
-            trk['roads'].append((int(parts[1]), float(parts[2]), float(parts[3])))
+            if pending_width is not None:
+                cur_width = pending_width
+                pending_width = None
+            trk['roads'].append((int(parts[1]), float(parts[2]), float(parts[3]), cur_width))
         elif kw == 'OBSTACLE':
             trk['obstacles'].append(
                 (int(parts[1]), float(parts[2]), parts[3])
@@ -137,7 +163,7 @@ def load(path):
             trk['finish_segment'] = int(parts[1])
         # unknown directives are ignored on purpose
 
-    trk['segments'] = _build_segments(trk['roads'], trk['width'])
+    trk['segments'] = _build_segments(trk['roads'], trk['width'], trk['theme'])
     if trk['finish_segment'] is None:
         trk['finish_segment'] = len(trk['segments'])
     trk['lap_length'] = trk['finish_segment'] * SEGMENT_LENGTH
@@ -146,21 +172,24 @@ def load(path):
 
 
 def segment_at(trk, z_abs):
-    """Return (curve, y, width, x) interpolated at world distance z_abs."""
-    segments = trk['segments']
+    """Return (curve, y, width, heading) interpolated at world distance z_abs."""
+    return segment_at_list(trk['segments'], 0, z_abs)
+
+
+def segment_at_list(segments, base, z_abs):
+    """segment_at over a window: `base` is the absolute index of segments[0]."""
     n = len(segments)
-    idx = int(z_abs / SEGMENT_LENGTH)
+    idx = int(z_abs / SEGMENT_LENGTH) - base
     if idx < 0:
         idx = 0
     if idx >= n - 1:
         s = segments[n - 1]
-        return s['curve'], s['y'], s['width'], s['x']
-    frac = (z_abs - idx * SEGMENT_LENGTH) / SEGMENT_LENGTH
+        return s['curve'], s['y'], s['width'], s['heading']
+    frac = (z_abs - (idx + base) * SEGMENT_LENGTH) / SEGMENT_LENGTH
     a = segments[idx]
     b = segments[idx + 1]
     y = a['y'] + (b['y'] - a['y']) * frac
-    x = a['x'] + (b['x'] - a['x']) * frac
-    return a['curve'], y, a['width'], x
+    return a['curve'], y, a['width'], a['heading']
 
 
 OBSTACLE_TYPES = ('rock', 'cone', 'barrier', 'tree-stump')
@@ -183,16 +212,7 @@ def validate(trk):
     if finish is None or finish <= 0 or finish > n:
         errors.append('FINISH segment out of range (0..%d)' % n)
 
-    prev_curve = None
-    i = 0
-    while i < n:
-        seg = segments[i]
-        if prev_curve is not None:
-            jump = seg['curve'] - prev_curve
-            if jump > 4.0 or jump < -4.0:
-                errors.append('segment %d has a curve discontinuity (%.2f)' % (i, jump))
-        prev_curve = seg['curve']
-        i += 1
+    errors.extend(validate_segments(segments, 0))
 
     i = 0
     while i < len(trk.get('obstacles', [])):
@@ -219,6 +239,29 @@ def validate(trk):
     if not trk.get('name'):
         errors.append('missing NAME')
 
+    return errors
+
+
+MAX_CURVE_JUMP = 4.0
+MAX_WIDTH_STEP = 20.0          # a WIDTH ramp of 200 over 40 segments is 5
+
+
+def validate_segments(segments, base):
+    """Continuity checks shared by .trk validation and the journey window."""
+    errors = []
+    prev = None
+    i = 0
+    while i < len(segments):
+        seg = segments[i]
+        if prev is not None:
+            jump = seg['curve'] - prev['curve']
+            if jump > MAX_CURVE_JUMP or jump < -MAX_CURVE_JUMP:
+                errors.append('segment %d has a curve discontinuity (%.2f)' % (base + i, jump))
+            step = seg['width'] - prev['width']
+            if step > MAX_WIDTH_STEP or step < -MAX_WIDTH_STEP:
+                errors.append('segment %d has a width step (%.1f)' % (base + i, step))
+        prev = seg
+        i += 1
     return errors
 
 

@@ -1,6 +1,67 @@
-# Handoff — end of session 3
+# Handoff — end of session 4 (Phase 1 of the infinite road)
 
 For the next session, whoever holds the keyboard: a person or an assistant.
+
+## Session 4: the road no longer ends
+
+`docs/INFINITE-ROAD-SPEC.md` Phase 1 is built and passes its offline tests. It was
+deployed and driven on the device once: 7.0 miles to the end card, no traceback
+(PR #2). No tuning notes were taken from that drive yet. Phase 0 of the spec (measure fps on the device with the
+session 3 renderer, then a human drive of Autumn Hills, then write down what a `curve`
+of 3 and 6 feel like) was skipped at the user's direction, so every curve range in
+`regions.py` is still the spec's provisional guess.
+
+What exists:
+
+- `rng.py` — `game._Rng` moved out so `track.py`, the generator and the laptop tools
+  share one stable stream. It now uses the LCG's high bits (`s >> 8`): the low bit of
+  a mod-2^31 LCG alternates 0,1,0,1, which made `pick(0, 2)` useless as a coin. The
+  procedural backdrops therefore differ slightly from session 3's; nothing else does.
+- `regions.py` — data only: farmland, foothills, mountains (width, straight length,
+  curve, hill amplitude, altitude band, motif weights, dwell, obstacles, palette), plus
+  the full 11-region successor table from spec §4.2 so it need not be rewritten as
+  regions are added. Unbuilt successors collapse onto farmland (`STAND_IN`); that rule
+  disappears by itself as regions get built.
+- `journey.py` — `Generator(seed)`: region chain (dwell limits, no-immediate-return,
+  recent-visit halving, opener set), parametric motif recipes from spec §4.6, value-
+  noise terrain biased toward each region's altitude band, per-region obstacles on
+  straights only, static validation with reroll. A transition is a 150-segment straight
+  that ramps the width; palette blending is Phase 2. Chunk plans are ~40 µs each.
+- `window.py` — the segment window: `feed()` expands *one stretch per frame* (a chunk
+  is planned in one go, expanded lazily) so generation cost is spread; `trim()` drops
+  road 20 segments behind in batches of 40. A finite `.trk` is wrapped in the same
+  structure, so `draw_road` has one path.
+- `track.py` — `expand_stretch` is the shared expander; segments carry `heading` (the
+  running sum of curve, what the backdrop pans by) and `region`, and no absolute `x`.
+  `WIDTH` between `ROAD` lines now ramps the next stretch (see `tracks/FORMAT.md`).
+  `validate` also rejects width steps.
+- `game.py` — `--journey [seed]`, per-region palettes/sky/backdrop picked per band and
+  per frame (hard switch, zero extra draw calls), odometer HUD (one blit, re-rendered
+  every tenth of a mile), journey result panel, `RESULT` gains `seed= distance=
+  regions=`, journey stop is `outcome=stop`. Events: `region-<name>`, `starve`.
+- `test_journey.py` (500 seeds × 300 chunks, 4 s on the laptop), `tools/journey_dump.py`,
+  `tools/journey_export.py`, `tools/render_shot.py --journey`, `tools/racer_fps.py
+  --journey`. `tools/fake_pygame.py` gained enough of `font`/`time`/`event.clear` for
+  the *whole* `game.main()` loop to run off-device; both modes were run that way for
+  20 s and 130 s with no traceback, zero starves, and region changes logged.
+- `desktop/freracer` passes `--journey`. **Re-run `desktop/install.sh` on the device.**
+
+Phase 1's exit criterion is a human drive: ten minutes with no starvation and no
+visible kink, and someone saying the terrain "changes". The first drive happened;
+the notes from it (what a mountain hairpin feels like, whether the regions read)
+have not been written down. What session 5 should do, in order:
+
+1. `sh tools/deploy.sh`, then on the device `python2.5 test_journey.py --quick` (the
+   Python 2.5 side of the determinism claim has only been reasoned about, not run),
+   `python2.5 tools/racer_fps.py 15 120` for the session 3 baseline the spec's Phase 0
+   asked for, then `python2.5 tools/racer_fps.py 60 --journey 4471`. The journey number
+   includes generation and must show `starves=0`; if the worst second is well under the
+   probe's, the per-frame budget in `window.feed` is the first suspect.
+2. `n900 'sh /home/user/MyDocs/freracer/desktop/install.sh'`, then drive from the icon.
+3. Retune `regions.py` from that drive. Mountains use the spec's hairpin (`curve` 5–6
+   for 30 segments); nobody knows yet whether that is a corner or a wall.
+
+## Session 3 handoff, still current below
 
 **Bottom line: the road was never being drawn, and now it is.** Sessions 1 and 2 tuned
 `ROAD_COLOR` twice against a renderer that discarded 119 of its 120 road bands every

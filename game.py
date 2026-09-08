@@ -6,6 +6,9 @@ import sys
 import time
 import pygame
 import track
+import regions
+import rng
+import window as winmod
 from telemetry import Telemetry
 
 DEVNULL = open(os.devnull, 'wb')
@@ -73,6 +76,13 @@ THEMES = {
     },
 }
 DEFAULT_THEME = 'autumn-hills'
+
+# Every region of the infinite road is also a theme: same four colours, same
+# build_palette / build_backdrop / build_theme_background, one of each per
+# region built at startup, and the renderer picks per band by the segment's
+# region tag. A boundary crossing therefore costs no draw calls (spec 5.3).
+for _name in regions.REGIONS:
+    THEMES[_name] = regions.REGIONS[_name]['colors']
 
 # 'sky2' is doing two jobs: it is the bottom of the sky gradient *and* the
 # haze colour every distant thing fades into (see build_palette), so the road
@@ -151,21 +161,9 @@ SPRITE_COLORS.update(OBSTACLE_COLORS)
 SPRITE_COLORS.update(TRAFFIC_COLORS)
 
 
-class _Rng(object):
-    """Tiny deterministic LCG.
-
-    The backdrop is generated rather than shipped as art, and it has to come
-    out identical on the device and off it, so this does not use `random`
-    (whose stream is not guaranteed stable across Python versions, and the
-    device is on 2.5.4).
-    """
-
-    def __init__(self, seed):
-        self.s = seed
-
-    def pick(self, lo, hi):
-        self.s = (1103515245 * self.s + 12345) % 2147483648
-        return lo + self.s % (hi - lo)
+# The LCG that used to live here is rng.Rng, shared with the journey
+# generator and the laptop tools; the backdrop still seeds it the same way.
+_Rng = rng.Rng
 
 
 def _blend(color, target, t):
@@ -291,10 +289,7 @@ def sanitize_name(name):
     return s or 'track'
 
 
-def default_telemetry_path(track_path, trk):
-    base = trk.get('name', '')
-    if not base:
-        base = os.path.splitext(os.path.basename(track_path))[0]
+def default_telemetry_path(base):
     base = sanitize_name(base)
     d = 'telemetry'
     if not os.path.isdir(d):
@@ -435,47 +430,53 @@ def traffic_world_z(base_z, speed, t, lap_length):
     return z
 
 
-def find_obstacle_hit(obstacles, player_z, player_x, trk, hit_flags):
+def find_obstacle_hit(win, player_z, player_x):
+    """Obstacles live in the window as [abs_seg, offset, kind, hit_flag]."""
+    obstacles = win.obstacles
     i = 0
     while i < len(obstacles):
-        seg_i, offset, kind = obstacles[i]
-        if not hit_flags[i]:
-            obs_z = seg_i * SEGMENT_LENGTH + SEGMENT_LENGTH / 2.0
+        ob = obstacles[i]
+        if not ob[3]:
+            obs_z = ob[0] * SEGMENT_LENGTH + SEGMENT_LENGTH / 2.0
             if abs(player_z - obs_z) < SEGMENT_LENGTH:
                 # Compared in centreline-relative space, the same space
-                # player_x and the off-road test live in. The old version
+                # player_x and the off-road test live in. An earlier version
                 # added the segment's absolute centreline x to the obstacle
                 # and compared that against a relative player_x, so once the
-                # centreline drifted from the origin nothing could ever be
-                # hit.
-                _, _, width, _ = track.segment_at(trk, obs_z)
-                obs_x = offset * width
-                if abs(player_x - obs_x) < (CAR_HALF_WIDTH + OBSTACLE_HALF_WIDTH):
-                    hit_flags[i] = 1
-                    return i, kind
+                # centreline drifted from the origin nothing could be hit.
+                _, _, width, _ = win.segment_at(obs_z)
+                if abs(player_x - ob[1] * width) < (CAR_HALF_WIDTH + OBSTACLE_HALF_WIDTH):
+                    ob[3] = 1
+                    return i, ob[2]
         i += 1
     return -1, None
 
 
-def find_traffic_hit(traffic, player_z, player_x, t, trk, cooldowns):
+def find_traffic_hit(win, player_z, player_x, t, cooldowns):
+    traffic = win.traffic
     i = 0
     while i < len(traffic):
         seg_i, offset, speed, kind = traffic[i]
-        base_z = seg_i * SEGMENT_LENGTH
-        car_z = traffic_world_z(base_z, speed, t, trk['lap_length'])
+        car_z = traffic_world_z(seg_i * SEGMENT_LENGTH, speed, t, win.lap_length)
         if cooldowns[i] <= 0.0 and abs(player_z - car_z) < SEGMENT_LENGTH * 0.8:
-            # Centreline-relative, as in find_obstacle_hit above.
-            _, _, width, _ = track.segment_at(trk, car_z)
-            car_x = offset * width
-            if abs(player_x - car_x) < (CAR_HALF_WIDTH + OBSTACLE_HALF_WIDTH):
+            _, _, width, _ = win.segment_at(car_z)
+            if abs(player_x - offset * width) < (CAR_HALF_WIDTH + OBSTACLE_HALF_WIDTH):
                 cooldowns[i] = 2.0
                 return i, kind
         i += 1
     return -1, None
 
 
-def draw_road(screen, bg, backdrop, trk, palette, player_z, player_x):
+def draw_road(screen, bgs, backdrops, win, palettes, player_z, player_x):
     """Scanline road, walked near-to-far with a painter\'s clip.
+
+    Reads the segment window (window.py) rather than a whole track: segment
+    indices are local to the window and offset by win.base wherever an
+    absolute index matters (stripe parity, post spacing), so nothing pops
+    when the window is trimmed. bgs / backdrops / palettes are dicts keyed by
+    region (theme) name; each band takes the palette of its own segment\'s
+    region, and the sky and horizon take the camera segment\'s. That is the
+    Phase 1 "hard switch" at a region boundary - free in draw calls.
 
     The walk direction is the whole trick, and getting it backwards is what
     made this renderer draw nothing. Near-to-far, each band is drawn from
@@ -492,12 +493,11 @@ def draw_road(screen, bg, backdrop, trk, palette, player_z, player_x):
     endpoint, so each band reuses the previous band\'s far projection as its
     own near projection. One projection per segment instead of two.
     """
-    band_pal = palette[0]
-    pole_pal = palette[1]
-    segments = trk['segments']
+    segments = win.segments
+    base = win.base
     n = len(segments)
 
-    base_index = int(player_z / SEGMENT_LENGTH)
+    base_index = int(player_z / SEGMENT_LENGTH) - base
     if base_index >= n - 1:
         base_index = n - 2
     if base_index < 0:
@@ -513,7 +513,7 @@ def draw_road(screen, bg, backdrop, trk, palette, player_z, player_x):
     # road was simply not in frame. Placing the camera on the centreline is
     # also what makes a bend read as a bend - the road ahead diverges from
     # the camera's fixed heading and sweeps across the screen.
-    _, player_y, _, _ = track.segment_at(trk, player_z)
+    _, player_y, _, _ = win.segment_at(player_z)
     cam_y = player_y + CAMERA_HEIGHT
     cam_z = player_z
 
@@ -537,7 +537,7 @@ def draw_road(screen, bg, backdrop, trk, palette, player_z, player_x):
     curve_off = []
 
     a = segments[base_index]
-    dz = base_index * SEGMENT_LENGTH - cam_z
+    dz = (base + base_index) * SEGMENT_LENGTH - cam_z
     if dz < NEAR_PLANE:
         dz = NEAR_PLANE
     s = CAMERA_DEPTH / dz
@@ -552,10 +552,12 @@ def draw_road(screen, bg, backdrop, trk, palette, player_z, player_x):
         if idx >= n - 1:
             break
         b = segments[idx + 1]
+        aidx = base + idx
+        rp = palettes[b['region']]
         road_dx += segments[idx]['curve']
         road_x += road_dx
         curve_off.append(road_x)
-        dz = (idx + 1) * SEGMENT_LENGTH - cam_z
+        dz = (aidx + 1) * SEGMENT_LENGTH - cam_z
         if dz < NEAR_PLANE:
             dz = NEAR_PLANE
         s = CAMERA_DEPTH / dz
@@ -569,7 +571,7 @@ def draw_road(screen, bg, backdrop, trk, palette, player_z, player_x):
         # roadside furniture to it meant raising that threshold silently
         # thinned the posts out with distance, losing the strongest cue for
         # how fast the road is going past.
-        if idx % POLE_INTERVAL == 0:
+        if aidx % POLE_INTERVAL == 0:
             # Derived from the projection already in hand rather than
             # re-projecting the post's base and top: same scale factor, so
             # the post's screen height is just its world height times s.
@@ -578,7 +580,7 @@ def draw_road(screen, bg, backdrop, trk, palette, player_z, player_x):
                 pb = fw * (POLE_HALF_WIDTH / b['width'])
                 if pb < 1.0:
                     pb = 1.0
-                pc = pole_pal[i][(idx // POLE_INTERVAL) % 2]
+                pc = rp[1][i][(aidx // POLE_INTERVAL) % 2]
                 po = fw * POLE_OFFSET
                 ptop = int(fy - ph)
                 pwide = int(pb * 2.0)
@@ -593,7 +595,7 @@ def draw_road(screen, bg, backdrop, trk, palette, player_z, player_x):
             i += 1
             continue
 
-        pal = band_pal[i][(idx // 3) % 2]
+        pal = rp[0][i][(aidx // 3) % 2]
 
         # One full-width ground stripe per band. This is the periphery motion
         # cue: everything outside a narrow shoulder used to be a single static
@@ -627,7 +629,7 @@ def draw_road(screen, bg, backdrop, trk, palette, player_z, player_x):
         pygame.draw.polygon(screen, pal[2], (
             (nx - nw, ny), (nx + nw, ny), (fx + fw, fy), (fx - fw, fy)))
 
-        if idx % 6 < 3 and nw > 10.0:
+        if aidx % 6 < 3 and nw > 10.0:
             ln = nw * 0.035
             lf = fw * 0.035
             pygame.draw.polygon(screen, pal[3], (
@@ -652,14 +654,14 @@ def draw_road(screen, bg, backdrop, trk, palette, player_z, player_x):
         if top_y > H:
             top_y = H
         screen.set_clip((0, 0, W, top_y))
-        screen.blit(bg, (0, 0))
+        region = a['region']
+        backdrop = backdrops[region]
+        screen.blit(bgs[region], (0, 0))
         # The camera looks down the centreline\'s tangent (see road_x above),
-        # so the scenery pans by that tangent\'s heading. track.py\'s baked
-        # centreline x is useless to project against, but its first difference
-        # *is* that heading - the one thing it is good for.
+        # so the scenery pans by that tangent\'s heading, which the segment
+        # carries as the running sum of curve (track.expand_stretch).
         bw = backdrop.get_width()
-        pan = int(-(segments[base_index + 1]['x'] - segments[base_index]['x'])
-                  * BACKDROP_PAN) % bw
+        pan = int(-a['heading'] * BACKDROP_PAN) % bw
         btop = HORIZON_Y - BACKDROP_H
         screen.blit(backdrop, (pan - bw, btop))
         screen.blit(backdrop, (pan, btop))
@@ -704,7 +706,7 @@ def draw_car(screen, offset_frac):
 RESULT_HOLD = 12.0            # seconds the result panel stays up if untouched
 
 
-def draw_result(screen, outcome, elapsed, hits, par):
+def draw_result(screen, outcome, elapsed, hits, par, journey=None):
     """Post-race panel. Returns 1 if it drew something.
 
     Reaching the finish line used to return straight out of main(): the
@@ -715,36 +717,55 @@ def draw_result(screen, outcome, elapsed, hits, par):
     with no collisions. The lap is 48000 units and MAX_SPEED is 6000/s, so a
     good run is over in ten seconds; whatever else changes about the course,
     the end of a race has to say that it ended.
+
+    A journey ends when the player taps ('stop'), and the panel is its
+    journey log: distance, the regions in order, hits, and the seed so the
+    drive can be replayed with `game.py --journey <seed>`.
     """
+    big = pygame.font.Font(None, 76)
+    small = pygame.font.Font(None, 34)
+    dim = (168, 168, 176)
     if outcome == 'finish':
         title = 'FINISHED'
         accent = (250, 220, 90) if elapsed <= par else (235, 235, 235)
-    elif outcome == 'timeout':
-        title = 'TIME UP'
+        verdict = 'under par' if elapsed <= par else 'over par'
+        lines = [(big, title, accent),
+                 (small, '%.1f s' % elapsed, (238, 238, 238)),
+                 (small, 'par %.0f s - %s' % (par, verdict), dim),
+                 (small, 'hits %d' % hits, dim)]
+    elif outcome == 'stop' and journey:
         accent = (235, 235, 235)
+        lines = [(big, '%.1f mi' % journey['miles'], accent),
+                 (small, ' > '.join(journey['regions']), (238, 238, 238)),
+                 (small, '%.0f s - hits %d' % (elapsed, hits), dim),
+                 (small, 'seed %d' % journey['seed'], dim)]
+    elif outcome == 'timeout':
+        accent = (235, 235, 235)
+        lines = [(big, 'TIME UP', accent),
+                 (small, '%.1f s' % elapsed, (238, 238, 238)),
+                 (small, 'hits %d' % hits, dim)]
     else:
         return 0                      # 'quit' - the player asked to leave
+    lines.append((small, 'tap the screen to exit', (112, 112, 122)))
 
-    big = pygame.font.Font(None, 76)
-    small = pygame.font.Font(None, 34)
-    pw = 520
-    ph = 258
-    px = (W - pw) // 2
-    py = (H - ph) // 2
-    pygame.draw.rect(screen, (10, 10, 14), (px, py, pw, ph))
-    pygame.draw.rect(screen, accent, (px, py, pw, ph), 3)
-
-    verdict = 'under par' if elapsed <= par else 'over par'
-    lines = ((big, title, accent),
-             (small, '%.1f s' % elapsed, (238, 238, 238)),
-             (small, 'par %.0f s - %s' % (par, verdict), (168, 168, 176)),
-             (small, 'hits %d' % hits, (168, 168, 176)),
-             (small, 'tap the screen to exit', (112, 112, 122)))
-    y = py + 24
+    rendered = []
+    ph = 24
     i = 0
     while i < len(lines):
         font, text, colour = lines[i]
         surf = font.render(text, 1, colour)
+        rendered.append(surf)
+        ph += surf.get_height() + 8
+        i += 1
+    pw = 640
+    px = (W - pw) // 2
+    py = (H - ph) // 2
+    pygame.draw.rect(screen, (10, 10, 14), (px, py, pw, ph))
+    pygame.draw.rect(screen, accent, (px, py, pw, ph), 3)
+    y = py + 24
+    i = 0
+    while i < len(rendered):
+        surf = rendered[i]
         screen.blit(surf, (px + (pw - surf.get_width()) // 2, y))
         y += surf.get_height() + 8
         i += 1
@@ -769,8 +790,8 @@ def hold_result(screen):
 
 
 def default_track_path():
-    # Picked when launched with no arguments at all, e.g. from the Maemo
-    # desktop icon: lowest-numbered .trk next to game.py is the "main" course.
+    # Picked when launched with a bare path-less argument list and no
+    # --journey: lowest-numbered .trk next to game.py is the "main" course.
     here = os.path.dirname(os.path.abspath(__file__))
     track_dir = os.path.join(here, 'tracks')
     candidates = [f for f in os.listdir(track_dir) if f.endswith('.trk')]
@@ -780,30 +801,64 @@ def default_track_path():
     return os.path.join(track_dir, candidates[0])
 
 
+def _is_int(s):
+    try:
+        int(s)
+        return 1
+    except ValueError:
+        return 0
+
+
+USAGE = ('usage: python2.5 game.py <track.trk> [tilt_source] [telemetry_csv] [timeout_s]\n'
+         '       python2.5 game.py --journey [seed] [tilt_source] [telemetry_csv] [timeout_s]\n')
+
+MILE = 1000.0                 # segments; keeps the odometer human-sized
+
+
 def main():
-    if len(sys.argv) < 2:
+    argv = sys.argv[1:]
+    seed = None
+    track_path = None
+    if argv and argv[0] == '--journey':
+        argv = argv[1:]
+        if argv and _is_int(argv[0]):
+            seed = int(argv[0])
+            argv = argv[1:]
+        if seed is None:
+            seed = int(time.time())
+    elif argv:
+        track_path = argv[0]
+        argv = argv[1:]
+    else:
         track_path = default_track_path()
         if not track_path:
-            sys.stderr.write('usage: python2.5 game.py <track.trk> [tilt_source] [telemetry_csv] [timeout_s]\n')
+            sys.stderr.write(USAGE)
             return 2
-    else:
-        track_path = sys.argv[1]
-    tilt_path = sys.argv[2] if len(sys.argv) > 2 else ACCEL_PATH
-    # No cap by default: a human race ends on 'finish' or 'quit'. The 4th arg
+    tilt_path = argv[0] if len(argv) > 0 else ACCEL_PATH
+    # No cap by default: a human race ends on 'finish' or 'stop'. The 4th arg
     # is only for scripted/bot runs (bot_steer.py, tools/racer_fps.py) that
     # need a hard stop if the bot never reaches the finish line.
-    timeout_s = float(sys.argv[4]) if len(sys.argv) > 4 else None
+    timeout_s = float(argv[2]) if len(argv) > 2 else None
 
-    trk = track.load(track_path)
-    errors = track.validate(trk)
-    if errors:
-        i = 0
-        while i < len(errors):
-            sys.stdout.write(errors[i] + '\n')
-            i += 1
-        return 2
+    if track_path is None:
+        win = winmod.journey(seed)
+        theme_names = sorted(regions.REGIONS.keys())
+        run_name = 'journey-%d' % seed
+    else:
+        trk = track.load(track_path)
+        errors = track.validate(trk)
+        if errors:
+            i = 0
+            while i < len(errors):
+                sys.stdout.write(errors[i] + '\n')
+                i += 1
+            return 2
+        win = winmod.Window.from_track(trk)
+        theme_names = [trk.get('theme', DEFAULT_THEME)]
+        seed = trk['seed']
+        run_name = trk.get('name', '') or os.path.splitext(os.path.basename(track_path))[0]
 
-    telemetry_path = sys.argv[3] if len(sys.argv) > 3 else default_telemetry_path(track_path, trk)
+    telemetry_path = argv[1] if len(argv) > 1 else default_telemetry_path(run_name)
 
     # Spawned before pygame.init() / display setup on purpose - see
     # start_buzz_helper()'s comment.
@@ -812,18 +867,26 @@ def main():
     pygame.init()
     pygame.mouse.set_visible(False)
     screen = pygame.display.set_mode((W, H), pygame.FULLSCREEN, 16)
-    bg = build_theme_background(trk.get('theme', DEFAULT_THEME))
-    backdrop = build_backdrop(trk.get('theme', DEFAULT_THEME))
-    palette = build_palette(trk.get('theme', DEFAULT_THEME))
-    sprite_pal = palette[2]
+    bgs = {}
+    backdrops = {}
+    palettes = {}
+    i = 0
+    while i < len(theme_names):
+        name = theme_names[i]
+        bgs[name] = build_theme_background(name)
+        backdrops[name] = build_backdrop(name)
+        palettes[name] = build_palette(name)
+        i += 1
+    hud_font = pygame.font.Font(None, 40)
+    odo_text = ''
+    odo_surf = None
     tx = Telemetry(telemetry_path)
 
     player_z = 0.0
     player_x = 0.0
     speed = 0.0
 
-    obstacle_hit_flags = [0] * len(trk['obstacles'])
-    traffic_cooldowns = [0.0] * len(trk['traffic'])
+    traffic_cooldowns = [0.0] * len(win.traffic)
 
     last_tilt = (0, 0, -1000)
     t0 = time.time()
@@ -834,8 +897,11 @@ def main():
     sec_frames = 0
     frames = 0
     hits = 0
+    starves = 0
     outcome = ''
     pending_event = ''
+    cur_region = win.region_at(0.0)
+    regions_seen = [cur_region]
 
     calibration_sum = 0.0
     calibration_count = 0
@@ -909,9 +975,9 @@ def main():
                     traffic_cooldowns[i] -= dt
                 i += 1
 
-            if calibrated:
-                curve, _, width, _ = track.segment_at(trk, player_z)
+            curve, _, width, _ = win.segment_at(player_z)
 
+            if calibrated:
                 # Zone is judged on this frame's *incoming* position, before the car
                 # moves, so a hard-braking penalty actually slows this frame's travel
                 # instead of only being visible a frame late in telemetry.
@@ -977,14 +1043,14 @@ def main():
 
                 player_z += speed * dt
 
-                oi, okind = find_obstacle_hit(trk['obstacles'], player_z, player_x, trk, obstacle_hit_flags)
+                oi, okind = find_obstacle_hit(win, player_z, player_x)
                 if oi >= 0:
                     speed *= HIT_SPEED_SCALE
                     hits += 1
                     buzz_key = 'hit'
                     pending_event = 'hit-' + okind
 
-                ti, tkind = find_traffic_hit(trk['traffic'], player_z, player_x, race_t, trk, traffic_cooldowns)
+                ti, tkind = find_traffic_hit(win, player_z, player_x, race_t, traffic_cooldowns)
                 if ti >= 0:
                     speed *= HIT_SPEED_SCALE
                     hits += 1
@@ -994,12 +1060,28 @@ def main():
                 if buzz_key:
                     buzz_event(buzz_helper, buzz_key)
 
-            if player_z >= trk['lap_length']:
+            if win.finish is not None and player_z >= win.lap_length:
                 outcome = 'finish'
                 buzz_event(buzz_helper, 'finish')
 
+            # Keep the road ahead of the camera: one stretch per frame at
+            # most, so generation cost is spread rather than spiking (see
+            # window.feed). A starve is a bug worth seeing in telemetry.
+            if win.feed(player_z):
+                starves += 1
+                if not pending_event:
+                    pending_event = 'starve'
+            win.trim(player_z)
+
+            region = win.region_at(player_z)
+            if region != cur_region:
+                cur_region = region
+                regions_seen.append(region)
+                if not pending_event:
+                    pending_event = 'region-' + region
+
             base_index, cam_y, cam_z, curve_off = draw_road(
-                screen, bg, backdrop, trk, palette, player_z, player_x)
+                screen, bgs, backdrops, win, palettes, player_z, player_x)
             n_curve = len(curve_off)
 
             # Sprites are collected first and drawn far-to-near afterwards.
@@ -1008,22 +1090,22 @@ def main():
             # full-saturation cone at the horizon reads as nearer than the
             # road it is standing on.
             sprites = []
+            far_z = player_z + DRAW_DISTANCE * SEGMENT_LENGTH
             i = 0
-            while i < len(trk['obstacles']):
-                seg_i, offset, kind = trk['obstacles'][i]
-                obs_z = seg_i * SEGMENT_LENGTH + SEGMENT_LENGTH / 2.0
-                if obs_z >= player_z and obs_z < player_z + DRAW_DISTANCE * SEGMENT_LENGTH:
-                    _, oy, owidth, _ = track.segment_at(trk, obs_z)
-                    sprites.append((obs_z, offset * owidth, oy, kind))
+            while i < len(win.obstacles):
+                ob = win.obstacles[i]
+                obs_z = ob[0] * SEGMENT_LENGTH + SEGMENT_LENGTH / 2.0
+                if obs_z >= player_z and obs_z < far_z:
+                    _, oy, owidth, _ = win.segment_at(obs_z)
+                    sprites.append((obs_z, ob[1] * owidth, oy, ob[2]))
                 i += 1
 
             i = 0
-            while i < len(trk['traffic']):
-                seg_i, offset, tspeed, kind = trk['traffic'][i]
-                base_z = seg_i * SEGMENT_LENGTH
-                car_z = traffic_world_z(base_z, tspeed, race_t, trk['lap_length'])
-                if car_z >= player_z and car_z < player_z + DRAW_DISTANCE * SEGMENT_LENGTH:
-                    _, ty, twidth, _ = track.segment_at(trk, car_z)
+            while i < len(win.traffic):
+                seg_i, offset, tspeed, kind = win.traffic[i]
+                car_z = traffic_world_z(seg_i * SEGMENT_LENGTH, tspeed, race_t, win.lap_length)
+                if car_z >= player_z and car_z < far_z:
+                    _, ty, twidth, _ = win.segment_at(car_z)
                     sprites.append((car_z, offset * twidth, ty, kind))
                 i += 1
 
@@ -1045,12 +1127,21 @@ def main():
                     coff = curve_off[n_curve - 1]
                 else:
                     coff = curve_off[bi]
-                sp = sprite_pal[bi]
+                sp = palettes[win.region_at(sz)][2][bi]
                 draw_sprite(screen, coff + sx - player_x, sy, sz, cam_y, cam_z,
                             sp.get(kind, sp['']), OBSTACLE_HALF_WIDTH)
                 i -= 1
 
-            draw_car(screen, player_x / (trk['width'] * 2.0))
+            draw_car(screen, player_x / (width * 2.0))
+
+            # Odometer: re-rendered only when the tenth of a mile ticks over
+            # (every ~1.7 s at MAX_SPEED), so the HUD is one blit per frame.
+            text = '%.1f mi' % (player_z / (SEGMENT_LENGTH * MILE))
+            if text != odo_text:
+                odo_text = text
+                odo_surf = hud_font.render(text, 1, (240, 240, 240))
+            screen.blit(odo_surf, (W - odo_surf.get_width() - 16, 12))
+
             pygame.display.flip()
 
             frames += 1
@@ -1070,18 +1161,34 @@ def main():
         avg_fps = frames / elapsed if elapsed > 0.0 else 0.0
         if not outcome:
             outcome = 'timeout'
+        if outcome == 'quit' and win.finish is None:
+            # A journey has no finish line; tapping is how it ends. Calling
+            # that 'quit' in the RESULT line made it read as a bug.
+            outcome = 'stop'
 
-        tx.close({'outcome': outcome, 'elapsed': elapsed, 'hits': hits, 'par': trk['par'],
-                  'frames': frames, 'avg_fps': avg_fps})
+        distance = int(player_z / SEGMENT_LENGTH)
+        region_list = ','.join(regions_seen)
+        rerolls = 0
+        if win.gen is not None:
+            rerolls = win.gen.rerolls
+        tx.close({'outcome': outcome, 'elapsed': elapsed, 'hits': hits, 'par': win.par,
+                  'frames': frames, 'avg_fps': avg_fps, 'seed': seed,
+                  'distance': distance, 'regions': region_list,
+                  'chunks': len(win.chunk_log), 'rerolls': rerolls, 'starves': starves})
 
-        if draw_result(screen, outcome, elapsed, hits, trk['par']):
+        journey_info = None
+        if win.finish is None:
+            journey_info = {'miles': distance / MILE, 'regions': regions_seen, 'seed': seed}
+        if draw_result(screen, outcome, elapsed, hits, win.par, journey_info):
             hold_result(screen)
 
         pygame.quit()
-        sys.stdout.write('RESULT outcome=%s elapsed=%.1f hits=%d par=%g frames=%d avg_fps=%.1f\n' % (
-            outcome, elapsed, hits, trk['par'], frames, avg_fps))
+        sys.stdout.write('RESULT outcome=%s elapsed=%.1f hits=%d par=%g frames=%d avg_fps=%.1f '
+                         'seed=%d distance=%d regions=%s\n' % (
+                             outcome, elapsed, hits, win.par, frames, avg_fps,
+                             seed, distance, region_list))
         sys.stdout.flush()
-        if outcome == 'finish':
+        if outcome == 'finish' or outcome == 'stop':
             return 0
         if outcome == 'quit':
             return 1
