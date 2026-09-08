@@ -4,8 +4,9 @@ For the next session, whoever holds the keyboard: a person or an assistant.
 
 ## Session 4: the road no longer ends
 
-`docs/INFINITE-ROAD-SPEC.md` Phase 1 is built and passes its offline tests. **None of
-it has run on the device.** Phase 0 of the spec (measure fps on the device with the
+`docs/INFINITE-ROAD-SPEC.md` Phase 1 is built and passes its offline tests. It was
+deployed and driven on the device once: 7.0 miles to the end card, no traceback
+(PR #2). No tuning notes were taken from that drive yet. Phase 0 of the spec (measure fps on the device with the
 session 3 renderer, then a human drive of Autumn Hills, then write down what a `curve`
 of 3 and 6 feel like) was skipped at the user's direction, so every curve range in
 `regions.py` is still the spec's provisional guess.
@@ -46,8 +47,9 @@ What exists:
 - `desktop/freracer` passes `--journey`. **Re-run `desktop/install.sh` on the device.**
 
 Phase 1's exit criterion is a human drive: ten minutes with no starvation and no
-visible kink, and someone saying the terrain "changes". What session 5 should do, in
-order:
+visible kink, and someone saying the terrain "changes". The first drive happened;
+the notes from it (what a mountain hairpin feels like, whether the regions read)
+have not been written down. What session 5 should do, in order:
 
 1. `sh tools/deploy.sh`, then on the device `python2.5 test_journey.py --quick` (the
    Python 2.5 side of the determinism claim has only been reasoned about, not run),
