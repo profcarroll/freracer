@@ -1,8 +1,49 @@
-# Handoff — end of session 4 (Phase 1 of the infinite road)
+# Handoff — end of session 5 (the soundtrack)
 
 For the next session, whoever holds the keyboard: a person or an assistant.
 
-## Session 4: the road no longer ends
+## Session 5: the road has a soundtrack
+
+`docs/SOUNDTRACK.md` is the record: what the N900 can do with sound from Python 2.5,
+measured on the device, and the procedural synthesizer built on it (`synth.py`,
+`music.py`, `tools/render_song.py`, `--music` on `racer_fps.py`, `--mute` on `game.py`).
+It is on the `soundtrack` branch, deployed to the device, bot-driven there, and has
+**not been listened to on the device's speakers by a person** — every level was set
+from WAVs rendered on the laptop.
+
+The three things worth knowing before touching it:
+
+1. **PulseAudio, not the synth, is the cost.** Nokia's system-mode pulse takes about a
+   third of the CPU whenever any stream plays anything; sample rate, channel count and
+   mono/stereo make no difference, only the SDL buffer size does, and 4096 is the knee.
+   The full game loop measures ~21 fps with music, ~26 muted, on the journey. There is
+   no cheaper sink to route to (pulse owns `hw:0,0`; everything that is not the phone
+   stack is class `x-maemo` and goes through the music chain).
+2. **`pygame.mixer.Sound(<str>)` leaves a stale TypeError** that surfaces at the next
+   unrelated C call (`audioop.ratecv`, twice). Sounds are built from a WAV in a
+   `cStringIO`. Two probes were misread because of this before it was found.
+3. **Timing is sample-accurate, not frame-locked.** Beats are rendered as generators a
+   few ms per frame and handed to one channel with `Channel.queue()`, which SDL_mixer
+   1.2.6 swaps gaplessly. The composer is therefore fed the road 1.2 s ahead of the car
+   (`music.road_context`), and 3 s ahead for corner build-ups.
+
+What session 6 should do, in order:
+
+1. `n900 'cd /home/user/MyDocs/freracer && DISPLAY=:0 python2.5 music.py 20 1 farmland,mountains'`
+   and listen. Then drive a journey from the icon with the sound on. Write down whether
+   the hats and the lead read on the small speakers, whether 21 fps feels worse than 26,
+   and whether the corner roll arrives before the corner.
+2. Tune `STYLES` in `music.py` from that: tempo, density, instruments. Regenerate the
+   WAVs with `render_song.py` to compare; the seed replays.
+3. Decide whether the music is worth the frame rate by default, or whether the launcher
+   should pass `--mute`. Headphones or the FM transmitter may skip the speaker
+   protection stage of pulse's chain and cost less; untested.
+4. Open items in `docs/SOUNDTRACK.md` §5: traffic is silent, `.trk` tracks have no
+   motif tags so no corner rolls, styles could become a text format the model writes.
+
+## Session 4 handoff, still current below
+
+### Session 4: the road no longer ends
 
 `docs/INFINITE-ROAD-SPEC.md` Phase 1 is built and passes its offline tests. It was
 deployed and driven on the device once: 7.0 miles to the end card, no traceback

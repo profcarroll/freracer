@@ -213,6 +213,34 @@ python2.5 bot_steer.py /tmp/tilt "0,300,-800:2;0,-300,-800:2;0,0,-1000:2"
 Each script segment is `x,y,z:seconds` in milli-g, rewritten every 100 ms (`y` is the
 steering axis, same convention as fremarble's marble control).
 
+## The soundtrack
+
+The car has a soundtrack, and it is written while you drive: `synth.py` is a soundchip
+built from `array`, `audioop` and the SDL mixer, `music.py` composes one beat at a time
+from the road ahead. Every region is a style (farmland is a country shuffle, mountains a
+minor-key 138 bpm with a saw lead and a 16th-note arpeggio, small-town a waltz), speed
+adds layers, a hairpin you are about to reach gets a snare roll, bends steer the melody,
+hills push its register, a collision plays a cluster, a region change is a crash and a
+new key. Same seed, same song. `docs/SOUNDTRACK.md` has the device measurements and the
+design.
+
+It costs frame rate: PulseAudio on the N900 takes about a third of the CPU whenever any
+stream is playing, whatever it plays, and the game runs **~21 fps with music against ~26
+without**. `--mute` (anywhere on the command line, or `FRERACER_MUTE=1`) turns it off.
+After the `RESULT` line the game prints `MUSIC blocks= starves= ...`; `starves` should be
+0, and a non-zero count means a beat was not rendered in time.
+
+```
+python2.5 music.py 30 4471                      # on the device: play seed 4471, no display
+python2.5 music.py 20 1 mountains,city          # audition two styles
+python3 tools/render_song.py --seed 4471 --seconds 120 --out /tmp/seed4471.wav   # on the laptop
+python3 tools/render_song.py --regions farmland,mountains --seconds 30
+```
+
+`render_song.py` runs the real composer through an offline mixer and writes a WAV, the
+way `render_shot.py` writes a PNG: it is how the styles were tuned. It has not yet been
+listened to on the device's own speakers.
+
 ## Designing a new track
 
 ```
@@ -242,6 +270,10 @@ this tool (bytes to atoms — a human carries it over with `scp`).
 | `tools/racer_fps.py` | frame-rate probe for the road renderer, run on-device first; `--journey` includes generation |
 | `tools/journey_dump.py`, `tools/journey_export.py` | print a journey's chunk table; write a journey slice as a finite `.trk` |
 | `tools/render_shot.py`, `tools/fake_pygame.py` | render frames of a track or a journey to PNG off-device, to check a rendering change before carrying it over |
+| `synth.py` | the soundchip: wavetable notes, drums, note cache, the beat mixer |
+| `music.py` | the composer (styles per region, harmony, phrases, drums) and the stream that feeds the SDL mixer; `python2.5 music.py` plays a demo |
+| `tools/render_song.py`, `tools/fake_audioop.py` | render the soundtrack to a WAV on the laptop |
+| `docs/SOUNDTRACK.md` | N900 audio capabilities as measured, and the soundtrack design |
 | `tools/deploy.sh` | copy the game, tracks and `racer_fps.py` to the device over `scp` |
 | `tools/generate_track.py` | prompts `qwen3-coder` on `sld-cloud` for new tracks, validates output |
 | `desktop/` | Hildon app-grid launcher: `.desktop` entry, `/usr/bin/freracer` script, icon, `install.sh` |
