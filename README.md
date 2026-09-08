@@ -42,6 +42,41 @@ and player make it worth playing? Racing adds two things marble-tilt didn't have
 forward dimension (speed, braking zones, racing lines) and other agents on the track
 (traffic to read and react to, not just static hazards).
 
+## Installing a release on another N900
+
+Releases carry a real Maemo 5 package — `freracer_<version>_all.deb`, `Section:
+user/games`, so the Application manager treats it as an application — plus a
+prebuilt apt repository so a device can *update* rather than be re-copied.
+
+**The N900 cannot download it from GitHub.** Its OpenSSL is 0.9.8n and tops out
+at TLS 1.0; GitHub requires TLS 1.2, so `github.com`, `raw.githubusercontent.com`
+and `*.github.io` all fail the handshake (`tlsv1 alert protocol version`), and
+stock Maemo's BusyBox has neither `wget` nor `curl`. GitHub holds the release; a
+plain-HTTP host reachable from the device is what serves it. On a laptop on the
+same Wi-Fi:
+
+```
+sh packaging/serve-repo.sh        # builds .deb + repo, prints your LAN address
+```
+
+Then on the device, **Application manager → menu title → Application catalogues
+→ New**, with Web address `http://<laptop-ip>:8000/`, Distribution `fremantle`,
+Components `free`. freracer appears under Download; the next release appears
+under Update. `http://<laptop-ip>:8000/freracer.install` opened in the device's
+browser does the same thing in one tap (Maemo's one-click install format).
+
+The catalogue is unsigned — Maemo asks *install without verification?*, answer
+`y`. Nobody signs packages for a platform Nokia retired.
+
+Without the catalogue, `dpkg -i freracer_<version>_all.deb` works; you just lose
+updates. The package installs the game to `/opt/freracer` (the 2 GB partition —
+the rootfs is 256 MB), the launcher to `/usr/bin/freracer`, and the app-grid
+entry and icon; logs and telemetry go to `~/.freracer`, which removal leaves
+alone. The soundtrack ships with it and plays by default, at the frame-rate cost
+recorded under "The soundtrack" below — `freracer --mute` from a shell, or `FRERACER_MUTE=1`, turns it
+off. See [`docs/PACKAGING.md`](docs/PACKAGING.md) for how the package and repo
+are built, and what breaks if you build them the modern way.
+
 ## Deploying to the N900
 
 ```
@@ -138,9 +173,11 @@ n900 'sh /home/user/MyDocs/freracer/desktop/install.sh'
 ```
 
 freracer then shows up under Games in the app grid like any other installed game — no
-terminal required to play. This is a from-source install (`install(1)` copying three
-files into place), not a `.deb`/Application Manager package; that would be the natural
-next step if freracer needs to be distributed beyond this repo.
+terminal required to play. This is the from-source dev install (`install(1)` copying
+three files into place); the `.deb` above is the same three files plus the game itself,
+for anyone who is not developing it. The two can coexist: `/usr/bin/freracer` looks for
+`/opt/freracer` first and falls back to `/home/user/MyDocs/freracer`, and `FRERACER_HOME`
+overrides both.
 
 ### Checking render performance first
 
@@ -277,6 +314,9 @@ this tool (bytes to atoms — a human carries it over with `scp`).
 | `tools/deploy.sh` | copy the game, tracks and `racer_fps.py` to the device over `scp` |
 | `tools/generate_track.py` | prompts `qwen3-coder` on `sld-cloud` for new tracks, validates output |
 | `desktop/` | Hildon app-grid launcher: `.desktop` entry, `/usr/bin/freracer` script, icon, `install.sh` |
+| `packaging/` | the Maemo 5 `.deb` and the apt repository around it: `build-deb.sh`, `build-repo.sh`, `serve-repo.sh`, control template, icon, maintainer scripts |
+| `docs/PACKAGING.md` | how the package and catalogue are built, and the 2009-platform constraints that shape them |
+| `.github/workflows/release.yml` | tag `v*` → build the package and publish the GitHub release |
 | `.github/copilot-instructions.md` | the Python 2.5 bootstrap every model gets |
 
 ## Known behaviour / open questions

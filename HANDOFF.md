@@ -1,8 +1,63 @@
-# Handoff — end of session 5 (the soundtrack)
+# Handoff — end of session 6 (freracer is a package)
 
 For the next session, whoever holds the keyboard: a person or an assistant.
 
-## Session 5: the road has a soundtrack
+## Session 6: freracer is a package now
+
+freracer installs on an N900 that is not this one, through the Application manager,
+and updates the same way. `packaging/` builds a Maemo 5 `.deb` and an apt catalogue
+around it; `.github/workflows/release.yml` publishes both on a `v*` tag. The full
+why is in `docs/PACKAGING.md` — read that before touching any of it, because most
+of the design is dictated by 2009 platform limits rather than by taste.
+
+The one that shapes everything: **the device cannot download from GitHub.** OpenSSL
+0.9.8n tops out at TLS 1.0, GitHub has required TLS 1.2 since 2018, and BusyBox has
+no `wget` or `curl`. `github.com`, `raw.githubusercontent.com` and `*.github.io` all
+fail the handshake outright (`tlsv1 alert protocol version`, checked on device). So
+a GitHub Pages catalogue — the obvious design — is impossible. GitHub holds the
+artifacts; a plain-HTTP host serves them. `packaging/serve-repo.sh` is that host on
+the LAN, in one command. A plain-HTTP VPS (sld-cloud) is the option not yet taken,
+and is what an N900 owner elsewhere would need for unattended updates.
+
+Verified on the device this session, all the way through: `apt-get update` off the
+served catalogue, `apt-get install freracer`, then launched as `user` through the
+packaged launcher, soundtrack and all:
+
+```
+RESULT outcome=timeout elapsed=25.3 hits=1 par=0 frames=509 avg_fps=20.1 seed=4471 ...
+MUSIC blocks=50 starves=0 renders=31 worst_step_ms=49.0
+```
+
+20.1 fps with music from `/opt`, which matches session 5's ~21, and no starves.
+The *update* path was checked too: a second revision built into the same repo
+shows up as `Installed: 0.1.0-1 / Candidate: 0.1.0-2` and `apt-get upgrade` plans
+the swap. **freracer 0.1.0-1 is installed on the device right now.**
+
+A near miss worth recording: this branch was first cut from a local `master` that
+predated the soundtrack merge, so the first package shipped without `synth.py` or
+`music.py` and nobody would have noticed — `game.py` imports `music` in a `try`
+and runs silently without it. Rebasing onto `origin/master` fixed it. **When the
+package gains a file, `packaging/build-deb.sh`'s `GAME=` list and
+`tools/deploy.sh`'s must change together**; they are the same list written twice.
+
+One behaviour change to know about: `/usr/bin/freracer` no longer hard-codes
+`/home/user/MyDocs/freracer`. It prefers `/opt/freracer` (where the package puts the
+game), falls back to the `deploy.sh` dev tree, and takes `FRERACER_HOME` over both.
+**Because the package is installed, the app-grid icon now runs `/opt/freracer`, not
+your `deploy.sh` copy** — so `sh tools/deploy.sh` alone will no longer change what
+the icon launches. Either `apt-get remove freracer`, or launch with
+`FRERACER_HOME=/home/user/MyDocs/freracer`. It also runs the game from
+`~/.freracer` instead of from the install directory, because `game.py` writes its
+telemetry CSV under the working directory and `/opt` is root-owned while Hildon
+launches as `user`; logs and telemetry live there now, and removal leaves them.
+
+Not done: no release is published yet — the work is on PR #4, held for review. The
+release is one `git tag -a v0.1.0` away once that merges. Also not done: a
+plain-HTTP host, so today an N900 that is not on this LAN still cannot update.
+
+## Session 5 handoff, still current below
+
+### Session 5: the road has a soundtrack
 
 `docs/SOUNDTRACK.md` is the record: what the N900 can do with sound from Python 2.5,
 measured on the device, and the procedural synthesizer built on it (`synth.py`,
@@ -27,7 +82,7 @@ The three things worth knowing before touching it:
    1.2.6 swaps gaplessly. The composer is therefore fed the road 1.2 s ahead of the car
    (`music.road_context`), and 3 s ahead for corner build-ups.
 
-What session 6 should do, in order:
+Still to do, in order:
 
 1. `n900 'cd /home/user/MyDocs/freracer && DISPLAY=:0 python2.5 music.py 20 1 farmland,mountains'`
    and listen. Then drive a journey from the icon with the sound on. Write down whether
@@ -122,10 +177,12 @@ of `MAX_SPEED` / `STEER_GAIN` / `CENTRIFUGAL` / `DRAW_DISTANCE` until someone do
 
 | Thing | Where |
 |---|---|
-| This repo | `github.com/profcarroll/freracer` (private) |
-| Working copy on the device | `/home/user/MyDocs/freracer/` on the N900 |
+| This repo | `github.com/profcarroll/freracer` (public) |
+| Working copy on the device | `/home/user/MyDocs/freracer/` on the N900 (the `deploy.sh` dev tree) |
+| Packaged copy on the device | `/opt/freracer/`, freracer 0.1.0-1, installed from the catalogue. This is what the app-grid icon runs. |
+| Player data on the device | `/home/user/.freracer/` — `freracer.log` and `telemetry/`, left behind by `apt-get remove` |
 | N900 access | laptop shortcut `n900` (root over legacy SSH crypto, same shim as fremarble). IP 10.0.0.70 by DHCP. |
-| Desktop launcher | installed (`desktop/install.sh`); freracer appears in the Hildon app grid under Games |
+| Desktop launcher | `/usr/bin/freracer`, now owned by the `.deb`; freracer appears in the Hildon app grid under Games |
 | Cloud node | `ssh sld-cloud`. Ollama on 127.0.0.1:11434. `qwen3-coder:30b-a3b-q4_K_M` is the
   track designer — reach it from the laptop with `ssh -L 11434:127.0.0.1:11434 sld-cloud`. |
 | Sibling project | `fremarble` — same device, same course, same conventions. |
@@ -327,9 +384,9 @@ patching. Suggested starting point:
    still not done.
 7. **Project card PR to the class repo** — already opened this session
    (`mfadt/sld-fall-2026` PR #20, project card + index row for freracer, status
-   "prototype"). Update its status once there's a real human playtest result to report;
-   don't forget freracer itself is currently a **private** repo, so it won't show up in
-   the `topic:sldllm-f26` showcase search until/unless that's made public.
+   "prototype"). Update its status once there's a real human playtest result to report.
+   (The repo is **public** now, so the `topic:sldllm-f26` showcase search will find it;
+   the session-4 note saying otherwise was stale.)
 
 ## Gotchas learned the hard way
 

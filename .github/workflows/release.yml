@@ -1,0 +1,58 @@
+# Build the Maemo 5 package and publish it as a GitHub release, on tag.
+#
+#   git tag -a v0.1.1 -m "..." && git push origin v0.1.1
+#
+# Everything here also runs by hand (packaging/build-deb.sh, build-repo.sh);
+# the workflow exists so a tag is enough, and so the artifacts a person
+# downloads are built from exactly the tagged tree.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag matches VERSION
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF#refs/tags/v}"
+          file="$(cat VERSION)"
+          if [ "$tag" != "$file" ]; then
+            echo "tag v$tag does not match VERSION ($file)" >&2
+            exit 1
+          fi
+
+      - name: Build the .deb
+        run: sh packaging/build-deb.sh
+
+      - name: Build the apt repository
+        run: sh packaging/build-repo.sh "http://REPLACE-WITH-YOUR-LAPTOP-IP:8000/"
+
+      - name: Package the repository tree
+        run: |
+          version="$(cat VERSION)"
+          tar -czf "dist/freracer-repo-${version}.tar.gz" -C dist repo
+          cp dist/repo/freracer.install dist/freracer.install
+          (cd dist && sha256sum freracer_*.deb freracer-repo-*.tar.gz > SHA256SUMS)
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(cat VERSION)"
+          gh release create "v${version}" \
+            --title "freracer v${version}" \
+            --notes-file packaging/release-notes.md \
+            dist/freracer_*.deb \
+            "dist/freracer-repo-${version}.tar.gz" \
+            dist/freracer.install \
+            dist/SHA256SUMS

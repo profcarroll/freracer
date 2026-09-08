@@ -1,0 +1,23 @@
+Package: freracer
+Version: @VERSION@
+Section: user/games
+Priority: optional
+Architecture: @ARCH@
+Installed-Size: @INSTALLED_SIZE@
+Depends: python2.5, python-pygame
+Maintainer: David Carroll <CarrollD@newschool.edu>
+Homepage: https://github.com/profcarroll/freracer
+XSBC-Bugtracker: https://github.com/profcarroll/freracer/issues
+XB-Maemo-Display-Name: freracer
+Description: pseudo-3D accelerometer racer for the N900
+ A scanline pseudo-3D racer in the tradition of Pole Position and OutRun,
+ steered with the N900's accelerometer - tilt left and right, no touchscreen
+ driving controls, throttle is automatic. Curbs, obstacles and traffic buzz
+ the vibrator.
+ .
+ The desktop icon starts a journey: an endless, seeded, procedurally
+ generated drive through changing regions. Two finite courses also ship,
+ one hand-built and one designed by a self-hosted language model.
+ .
+ Built for PSAM 5600 B, Small Linux Devices, Large Language Models
+ (Parsons, Fall 2026).
