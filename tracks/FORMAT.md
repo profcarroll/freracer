@@ -16,7 +16,12 @@ Directives:
     THEME <keyword>                   scenery palette, e.g. autumn-hills, dusk-city, coast
     SEED <int>                        used to seed scenery/decoration placement (trees etc.)
     PAR <seconds>                     target lap time
-    WIDTH <units>                     road half-width in world units (default 1000)
+    WIDTH <units>                     road half-width in world units (default 1000).
+                                       Before the first ROAD it sets the starting width.
+                                       Between ROAD lines it makes the *next* stretch ramp
+                                       linearly from the current width to the new one -
+                                       how an exported journey carries a region's width
+                                       change across (tools/journey_export.py).
     ROAD <segments> <curve> <hill>    add a stretch: segments = length in 100-unit steps,
                                        curve = signed curvature strength (0 = straight,
                                        positive = bends right, negative = bends left,

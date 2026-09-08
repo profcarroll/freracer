@@ -32,8 +32,7 @@ class Telemetry(object):
     def close(self, summary_dict):
         if not self.f:
             return
-        items = summary_dict.items()
-        items.sort()
+        items = sorted(summary_dict.items())
         s = []
         i = 0
         while i < len(items):

@@ -29,6 +29,10 @@ designed by a self-hosted language model. Sibling project to
   Turismo-flavoured seasonal opener) and one model-generated track (Night Circuit,
   `qwen3-coder`, passed validation on the first attempt). No human has driven it with
   the accelerometer yet — see `HANDOFF.md`.
+- **The infinite road:** the desktop icon now starts a *journey* — an endless,
+  seeded, procedurally generated drive through changing regions (farmland, foothills,
+  mountains so far). Phase 1 of `docs/INFINITE-ROAD-SPEC.md`; see "Driving the
+  infinite road" below.
 
 ## The idea
 
@@ -75,19 +79,57 @@ launcher's shell exited with it, and the player landed back at the app grid with
 explanation; the first playtest of the fixed renderer reported that as a crash.
 
 `game.py [track] [tilt_source] [telemetry_csv] [timeout_s]` — all arguments are optional.
-With no track given it plays the lowest-numbered `.trk` in `tracks/` (this is what the
-desktop launcher does). Hold the device the way you want to play for the first
+With no track given it plays the lowest-numbered `.trk` in `tracks/`; the desktop
+launcher instead passes `--journey` (see "Driving the infinite road"). Hold the device the way you want to play for the first
 half-second: that angle becomes "straight ahead". Reach the finish line or touch the
 screen to end; there is no time limit for human play (the 4th, `timeout_s`, argument is
 only for scripted bot runs that might otherwise never reach the finish line — see below).
 The last line printed is always
 `RESULT outcome=... elapsed=... hits=... par=... frames=... avg_fps=...`.
 
+### Driving the infinite road
+
+```
+python2.5 game.py --journey                          # seed from the clock
+python2.5 game.py --journey 4471                     # replay a seed
+python2.5 game.py --journey 4471 /tmp/tilt telemetry/bot.csv 120   # bot run, 120 s cap
+```
+
+A journey has no finish line. The road is generated a chunk at a time just ahead of
+the camera (`window.py`, `journey.py`) from one integer seed, so the same seed is the
+same road on the device and on the laptop. Tap the screen to stop; the panel shows
+miles driven, the regions in order, hits, and the seed. The `RESULT` line gains
+`seed=`, `distance=` (segments) and `regions=`, and the telemetry summary adds
+`chunks`, `rerolls` and `starves` (a starve — the generator failing to stay ahead of
+the camera — is also logged as an event, and must never happen).
+
+What a region is, what its road does and what it looks like is data in `regions.py`
+(spec §4.3). The region chain is a weighted Markov chain with dwell limits; chunks
+are built from parametric motif recipes (straight, sweeper, esses, crest, hairpin,
+switchback) with value-noise terrain that continues across chunk boundaries and is
+biased toward each region's altitude band. Palettes switch hard at a region boundary
+for now; blending is Phase 2.
+
+From the laptop, without the device:
+
+```
+python3 test_journey.py                       # 500 seeds x 300 chunks; --quick for 50 x 60
+python3 tools/journey_dump.py --seed 4471 --chunks 40     # the chunk table, human-readable
+python3 tools/render_shot.py --journey 4471 --frames 12 --out /tmp/shots
+python3 tools/journey_export.py --seed 4471 --chunks 8 --out tracks/944-seed-4471.trk
+```
+
+`journey_export.py` writes the first N chunks as an ordinary finite `.trk` (it goes
+through the same expander as the live window, so it is the same road segment for
+segment), which is how a slice a human liked gets kept, and how the existing track
+tooling gets to exercise generated road. On the device, `tools/racer_fps.py 60
+--journey 4471` measures the frame rate with generation in the loop.
+
 ### Launching from the Maemo desktop
 
 `desktop/` holds a real Hildon app-grid entry: `freracer.desktop`, a `/usr/bin/freracer`
-launcher script (cds into the install directory, runs untimed, logs to
-`freracer.log`), and a 64×64 icon. This is a **one-time** step, separate from
+launcher script (cds into the install directory, runs `game.py --journey` untimed,
+logs to `freracer.log`), and a 64×64 icon. This is a **one-time** step, separate from
 `deploy.sh`: it runs on the device, as root, after the repo is there, and only needs
 re-running if something in `desktop/` changes. It is already installed on the device.
 
@@ -190,12 +232,16 @@ this tool (bytes to atoms — a human carries it over with `scp`).
 | Path | What |
 |---|---|
 | `game.py` | game loop, pseudo-3D road renderer, physics, steering, haptics |
-| `track.py`, `test_track.py`, `tracks/FORMAT.md` | `.trk` format, loader/builder, validator |
+| `journey.py`, `regions.py`, `window.py`, `rng.py` | the infinite road: chunk generator and region chain, region data, the segment window the renderer reads, the shared deterministic RNG |
+| `test_journey.py` | offline test of the generator: continuity, dwell, determinism, window never starves, export round-trips |
+| `docs/INFINITE-ROAD-SPEC.md` | the design; Phase 1 is built |
+| `track.py`, `test_track.py`, `tracks/FORMAT.md` | `.trk` format, loader/builder (also the segment expander the window shares), validator |
 | `tracks/001-autumn-hills.trk` | the first, hand-built track |
 | `telemetry.py` | 10 Hz CSV writer (z, speed, lateral offset, tilt, event) |
 | `bot_steer.py` | scripted tilt writer, same convention as fremarble's `bot_tilt.py` |
-| `tools/racer_fps.py` | frame-rate probe for the road renderer, run on-device first |
-| `tools/render_shot.py`, `tools/fake_pygame.py` | render frames to PNG off-device, to check a rendering change before carrying it over |
+| `tools/racer_fps.py` | frame-rate probe for the road renderer, run on-device first; `--journey` includes generation |
+| `tools/journey_dump.py`, `tools/journey_export.py` | print a journey's chunk table; write a journey slice as a finite `.trk` |
+| `tools/render_shot.py`, `tools/fake_pygame.py` | render frames of a track or a journey to PNG off-device, to check a rendering change before carrying it over |
 | `tools/deploy.sh` | copy the game, tracks and `racer_fps.py` to the device over `scp` |
 | `tools/generate_track.py` | prompts `qwen3-coder` on `sld-cloud` for new tracks, validates output |
 | `desktop/` | Hildon app-grid launcher: `.desktop` entry, `/usr/bin/freracer` script, icon, `install.sh` |

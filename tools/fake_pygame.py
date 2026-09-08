@@ -115,9 +115,16 @@ class _Draw(object):
         surf.calls['line'] += 1
         surf._span(int(p0[1]), p0[0], p1[0], tuple(color[:3]))
 
-    def rect(self, surf, color, r):
-        surf.fill(color, r)
+    def rect(self, surf, color, r, width=0):
         surf.calls['rect'] += 1
+        if width <= 0:
+            surf.fill(color, r)
+            return
+        r = r if isinstance(r, Rect) else Rect(r)
+        surf.fill(color, (r.x, r.y, r.w, width))
+        surf.fill(color, (r.x, r.y + r.h - width, r.w, width))
+        surf.fill(color, (r.x, r.y, width, r.h))
+        surf.fill(color, (r.x + r.w - width, r.y, width, r.h))
 
     def polygon(self, surf, color, pts):
         # Even-odd scanline fill. game.py only draws convex quads and one
@@ -150,6 +157,28 @@ class _Draw(object):
 draw = _Draw()
 
 
+class _Font(object):
+    """Enough of pygame.font for the HUD and result panel to run off-device.
+    Text renders as a flat box of the requested colour."""
+
+    def __init__(self, name, size):
+        self.size = int(size)
+
+    def render(self, text, aa, color):
+        surf = Surface((max(1, len(text) * self.size // 2), self.size))
+        surf.fill(color)
+        return surf
+
+
+class _FontModule(object):
+    Font = _Font
+
+
+class _Time(object):
+    def wait(self, ms):
+        pass
+
+
 class _Display(object):
     def set_mode(self, size, flags=0, depth=0):
         return Surface(size)
@@ -167,10 +196,15 @@ class _Event(object):
     def get(self):
         return []
 
+    def clear(self):
+        pass
+
 
 display = _Display()
 mouse = _Mouse()
 event = _Event()
+font = _FontModule()
+time = _Time()
 
 
 def init():
