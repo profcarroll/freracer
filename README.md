@@ -72,7 +72,9 @@ Without the catalogue, `dpkg -i freracer_<version>_all.deb` works; you just lose
 updates. The package installs the game to `/opt/freracer` (the 2 GB partition —
 the rootfs is 256 MB), the launcher to `/usr/bin/freracer`, and the app-grid
 entry and icon; logs and telemetry go to `~/.freracer`, which removal leaves
-alone. See [`docs/PACKAGING.md`](docs/PACKAGING.md) for how the package and repo
+alone. The soundtrack ships with it and plays by default, at the frame-rate cost
+recorded under "The soundtrack" below — `freracer --mute` from a shell, or `FRERACER_MUTE=1`, turns it
+off. See [`docs/PACKAGING.md`](docs/PACKAGING.md) for how the package and repo
 are built, and what breaks if you build them the modern way.
 
 ## Deploying to the N900

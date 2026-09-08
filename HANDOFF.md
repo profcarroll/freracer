@@ -21,8 +21,24 @@ and is what an N900 owner elsewhere would need for unattended updates.
 
 Verified on the device this session, all the way through: `apt-get update` off the
 served catalogue, `apt-get install freracer`, then launched as `user` through the
-packaged launcher — 130 seconds of journey, 1300 telemetry rows, empty log, no
-traceback. **freracer 0.1.0-1 is installed on the device right now.**
+packaged launcher, soundtrack and all:
+
+```
+RESULT outcome=timeout elapsed=25.3 hits=1 par=0 frames=509 avg_fps=20.1 seed=4471 ...
+MUSIC blocks=50 starves=0 renders=31 worst_step_ms=49.0
+```
+
+20.1 fps with music from `/opt`, which matches session 5's ~21, and no starves.
+The *update* path was checked too: a second revision built into the same repo
+shows up as `Installed: 0.1.0-1 / Candidate: 0.1.0-2` and `apt-get upgrade` plans
+the swap. **freracer 0.1.0-1 is installed on the device right now.**
+
+A near miss worth recording: this branch was first cut from a local `master` that
+predated the soundtrack merge, so the first package shipped without `synth.py` or
+`music.py` and nobody would have noticed — `game.py` imports `music` in a `try`
+and runs silently without it. Rebasing onto `origin/master` fixed it. **When the
+package gains a file, `packaging/build-deb.sh`'s `GAME=` list and
+`tools/deploy.sh`'s must change together**; they are the same list written twice.
 
 One behaviour change to know about: `/usr/bin/freracer` no longer hard-codes
 `/home/user/MyDocs/freracer`. It prefers `/opt/freracer` (where the package puts the
@@ -36,7 +52,8 @@ telemetry CSV under the working directory and `/opt` is root-owned while Hildon
 launches as `user`; logs and telemetry live there now, and removal leaves them.
 
 Not done: no release is published yet — the work is on PR #4, held for review. The
-release is one `git tag -a v0.1.0` away once that merges.
+release is one `git tag -a v0.1.0` away once that merges. Also not done: a
+plain-HTTP host, so today an N900 that is not on this LAN still cannot update.
 
 ## Session 5 handoff, still current below
 

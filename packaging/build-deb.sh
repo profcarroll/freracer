@@ -30,10 +30,11 @@ mkdir -p "$STAGE/DEBIAN" \
          dist
 
 # Exactly what Python 2.5 on the device runs - the same list tools/deploy.sh
-# copies. The Python 3 tools (generate_track.py, render_shot.py,
-# fake_pygame.py) are laptop-side and are deliberately not packaged.
+# copies, soundtrack included. The Python 3 tools (generate_track.py,
+# render_shot.py, fake_pygame.py, render_song.py, fake_audioop.py) are
+# laptop-side and are deliberately not packaged.
 GAME="game.py track.py rng.py regions.py journey.py window.py telemetry.py
-      bot_steer.py buzz_helper.py test_track.py test_journey.py"
+      bot_steer.py buzz_helper.py test_track.py test_journey.py synth.py music.py"
 for f in $GAME; do
     install -m 644 "$f" "$STAGE/opt/freracer/$f"
 done

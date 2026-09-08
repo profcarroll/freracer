@@ -34,4 +34,6 @@ DATADIR=${FRERACER_DATA:-$HOME/.freracer}
 mkdir -p "$DATADIR"
 cd "$DATADIR"
 
-exec python2.5 "$GAMEDIR/game.py" --journey >>"$DATADIR/freracer.log" 2>&1
+# Arguments are passed through, so `freracer --mute` works from a shell; the
+# .desktop entry invokes this with none, and the soundtrack plays.
+exec python2.5 "$GAMEDIR/game.py" --journey "$@" >>"$DATADIR/freracer.log" 2>&1

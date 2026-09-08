@@ -1,6 +1,11 @@
 A Maemo 5 (fremantle) package for the Nokia N900. Tap the icon and drive:
 the launcher starts a **journey** — an endless, seeded, procedurally
-generated road through changing regions. The two finite courses ship too.
+generated road through changing regions, with a soundtrack composed one beat
+at a time from the road ahead. The two finite courses ship too.
+
+The music costs frame rate — about 20 fps with it against 26 without, and
+PulseAudio rather than the synth is where that goes. `freracer --mute` from a
+shell, or `FRERACER_MUTE=1`, turns it off.
 
 **Requires** a Maemo 5 N900 with `python2.5` and `python-pygame` installed
 (both are in the archival Extras catalogue).
@@ -65,9 +70,10 @@ README.) Tapping the `.deb` in the file manager works too.
 
 ### What it installs
 
-`/opt/freracer` (the game, on the 2 GB partition — the rootfs is 256 MB),
-`/usr/bin/freracer` (the launcher), plus the app-grid entry and icon. Logs
-and telemetry go to `~/.freracer`, which `apt-get remove` leaves alone.
+`/opt/freracer` (the game and the soundtrack, on the 2 GB partition — the
+rootfs is 256 MB), `/usr/bin/freracer` (the launcher), plus the app-grid entry
+and icon. Logs and telemetry go to `~/.freracer`, which `apt-get remove`
+leaves alone.
 
 ### Notes
 

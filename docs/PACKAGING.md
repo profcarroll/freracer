@@ -115,3 +115,26 @@ apt-get install --dry-run freracer          # dependencies resolve on this devic
 `apt-cache policy` naming the catalogue as the candidate's origin is the signal
 that `Packages`, `Release` and the pool paths all line up; a repo with a broken
 `Release` fails earlier, during `update`.
+
+The *update* path is worth checking the same way, since it is the reason for
+having a catalogue at all. Build a second revision into the same repo
+(`DEB_REVISION=2 sh packaging/build-deb.sh && sh packaging/build-repo.sh`),
+refresh, and `apt-cache policy` reports the installed revision against the newer
+candidate, with `apt-get upgrade --dry-run` planning the swap:
+
+```
+  Installed: 0.1.0-1
+  Candidate: 0.1.0-2
+Inst freracer [0.1.0-1] (0.1.0-2 freracer:fremantle)
+```
+
+## What is in the package
+
+The same Python 2.5 files `tools/deploy.sh` copies — the game, the generator,
+the tracks, `synth.py` and `music.py`, and the three on-device tools. The
+soundtrack plays by default; `freracer --mute` from a shell or `FRERACER_MUTE=1`
+turns it off, and it costs frame rate (20.1 fps against ~26 muted, measured
+through the packaged launcher). The Python 3 laptop tools —
+`generate_track.py`, `render_shot.py`, `fake_pygame.py`, `render_song.py`,
+`fake_audioop.py` — are deliberately not packaged; they cannot run on the
+device.
